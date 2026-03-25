@@ -1,0 +1,88 @@
+# sbox
+
+A lightweight sandbox wrapper using [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). Runs commands with a read-only root filesystem and a writable workspace, limiting what a tool can accidentally (or intentionally) modify.
+
+## How it works
+
+- The entire filesystem is mounted read-only
+- Your workspace directory is mounted read-write
+- A set of common cache directories (npm, gradle, ~/.cache, etc.) are also writable
+- Tool-specific config directories get write access based on the command being run
+- Network access is preserved
+
+## Requirements
+
+- Linux
+- [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
+- Python 3.10+
+
+```
+sudo apt install bubblewrap   # Debian/Ubuntu
+sudo dnf install bubblewrap   # Fedora
+sudo pacman -S bubblewrap     # Arch
+```
+
+## Installation
+
+Copy `sbox` somewhere on your `$PATH`:
+
+```sh
+cp sbox ~/.local/bin/sbox
+```
+
+## Usage
+
+```
+sbox [OPTIONS] COMMAND [ARGS...]
+```
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--workspace PATH` | Explicitly set the workspace root |
+| `--tool TOOL` | Configure mounts for a specific tool (see below) |
+| `--rw PATH` | Add an extra read-write mount (repeatable) |
+| `--dry-run` | Print the `bwrap` command without running it |
+
+### Workspace detection
+
+The workspace root is detected automatically (unless `--workspace` is given):
+
+1. Walk up from the current directory looking for a marker file: `.sandbox-workspace`, `.sandbox-root`, `.sandboxrc`, `.workspace-root`, or `WORKSPACE`
+2. Fall back to the outermost git repository root
+
+The current directory must be inside the workspace.
+
+### Tool presets
+
+The `--tool` option (or auto-detection from the command name) controls which extra directories get write access:
+
+| Tool | Extra writable paths |
+|---|---|
+| `claude` | `~/.claude`, `~/.claude.json` |
+| `opencode` | `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` |
+| `none` | _(none)_ |
+
+If the command name matches a known tool, it's selected automatically. Otherwise, use `--tool` explicitly.
+
+## Examples
+
+```sh
+# Run claude with auto-detected workspace
+sbox claude
+
+# Run an arbitrary command with no tool-specific mounts
+sbox --tool none bash
+
+# Explicit workspace
+sbox --workspace ~/projects/myapp --tool none make test
+
+# Add an extra read-write mount (e.g. to allow git push)
+sbox --rw ~/.ssh --tool none git push
+
+# Use -- to pass options to the sandboxed command itself
+sbox -- claude --help
+```
+
+The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment.
