@@ -80,6 +80,9 @@ sbox --workspace ~/projects/myapp --tool none make test
 
 # Add an extra read-write mount (e.g. to allow git push)
 sbox --rw ~/.ssh --tool none git push
+
+# Use -- to pass options to the sandboxed command itself
+sbox -- claude --help
 ```
 
 The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment.
