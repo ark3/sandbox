@@ -4,7 +4,6 @@
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +25,7 @@ COMMON_RW_MOUNTS = [
     "~/.aws/cli/cache",
     "~/.aws/sso/cache",
     "~/.bun/install/cache",
+    "~/.config/agents",
     "~/.gradle/caches",
     "~/.m2/repository/.cache",
     "~/.npm",
@@ -44,7 +44,10 @@ TOOL_MOUNTS = {
     ],
     "pi": [
         "~/.pi/agent",
+    ],
+    "omp": [
         "~/.omp",
+        "~/.eclipse",
     ],
     "none": [],
 }
@@ -291,17 +294,15 @@ Examples:
         print(f"sbox [{tool}]: {workspace} ({rel_path})", file=sys.stderr)
 
     try:
-        result = subprocess.run(bwrap_cmd)
-        return result.returncode
+        # Replace this process with bwrap; main() does not return on success.
+        os.execvp("bwrap", bwrap_cmd)
     except FileNotFoundError:
         print(
             "Error: Failed to execute bwrap (this should not happen after check)",
             file=sys.stderr,
         )
         return 1
-    except KeyboardInterrupt:
-        print("\nInterrupted", file=sys.stderr)
-        return 130
+    # unreachable
 
 
 if __name__ == "__main__":
