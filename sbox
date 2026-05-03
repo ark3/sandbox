@@ -1,60 +1,69 @@
 #!/usr/bin/env python3
-
 """Generic bubblewrap sandbox tool with auto-detection."""
 
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 # Configuration
 MARKER_FILES = [
-    '.sandbox-workspace',
-    '.sandbox-root',
-    '.sandboxrc',
-    '.workspace-root',
-    'WORKSPACE'
+    ".sandbox-workspace",
+    ".sandbox-root",
+    ".sandboxrc",
+    ".workspace-root",
+    "WORKSPACE",
 ]
 
 COMMON_RW_MOUNTS = [
-    '/tmp',
-    '/var/tmp',
-    '~/.cache',
-    '~/.aider/caches',
-    '~/.aws/cli/cache',
-    '~/.aws/sso/cache',
-    '~/.bun/install/cache',
-    '~/.gradle/caches',
-    '~/.m2/repository/.cache',
-    '~/.npm',
-    '~/.sonar/cache',
+    "/tmp",
+    "/var/tmp",
+    "~/.cache",
+    "~/.aider/caches",
+    "~/.agents",
+    "~/.aws/cli/cache",
+    "~/.aws/sso/cache",
+    "~/.bun/install/cache",
+    "~/.config/agents",
+    "~/.gradle/caches",
+    "~/.m2/repository/.cache",
+    "~/.npm",
+    "~/.sonar/cache",
 ]
 
 TOOL_MOUNTS = {
-    'claude': [
-        '~/.claude',
-        '~/.claude.json',
+    "claude": [
+        "~/.claude",
+        "~/.claude.json",
     ],
-    'opencode': [
-        '~/.config/opencode',
-        '~/.local/share/opencode',
-        '~/.local/state/opencode',
+    "opencode": [
+        "~/.config/opencode",
+        "~/.local/share/opencode",
+        "~/.local/state/opencode",
     ],
-    'none': [],
+    "pi": [
+        "~/.pi/agent",
+    ],
+    "omp": [
+        "~/.omp",
+        "~/.eclipse",
+    ],
+    "none": [],
 }
+
+TOOL_MOUNTS["claude-agent-acp"] = TOOL_MOUNTS["claude"]
 
 
 def check_bubblewrap():
     """Verify bubblewrap is installed."""
-    if not shutil.which('bwrap'):
+    if not shutil.which("bwrap"):
         print("Error: bubblewrap (bwrap) is not installed", file=sys.stderr)
         print("", file=sys.stderr)
         print("Install with:", file=sys.stderr)
-        print(" sudo apt install bubblewrap # Debian/Ubuntu", file=sys.stderr)
-        print(" sudo dnf install bubblewrap # Fedora", file=sys.stderr)
-        print(" sudo pacman -S bubblewrap # Arch", file=sys.stderr)
+        print("  sudo apt install bubblewrap    # Debian/Ubuntu", file=sys.stderr)
+        print("  sudo dnf install bubblewrap    # Fedora", file=sys.stderr)
+        print("  sudo pacman -S bubblewrap      # Arch", file=sys.stderr)
         sys.exit(1)
 
 
@@ -80,7 +89,7 @@ def find_workspace_via_git(start_path: Path) -> Path | None:
     outermost_git_root = None
 
     while True:
-        git_dir = current / '.git'
+        git_dir = current / ".git"
         if git_dir.exists():
             outermost_git_root = current
 
@@ -107,8 +116,11 @@ def detect_tool(explicit_tool: str | None, command: str) -> str:
     print(f"Supported tools: {', '.join(TOOL_MOUNTS.keys())}", file=sys.stderr)
     print("", file=sys.stderr)
     print("Solutions:", file=sys.stderr)
-    print(f" - Use --tool to explicitly specify: sbox --tool none {command}", file=sys.stderr)
-    print(f" - Add '{command}' to TOOL_MOUNTS in {__file__}", file=sys.stderr)
+    print(
+        f"  - Use --tool to explicitly specify: sbox --tool none {command}",
+        file=sys.stderr,
+    )
+    print(f"  - Add '{command}' to TOOL_MOUNTS in {__file__}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -119,58 +131,68 @@ def expand_and_validate_path(path_str: str) -> Path | None:
     return path if path.exists() else None
 
 
-def build_bwrap_command(workspace: Path, tool: str, rw_paths: list[str],
-                        work_dir: Path, command: str, args: list[str]) -> list[str]:
+def build_bwrap_command(
+    workspace: Path,
+    tool: str,
+    rw_paths: list[str],
+    work_dir: Path,
+    command: str,
+    args: list[str],
+) -> list[str]:
     """Build the bubblewrap command line."""
-    cmd = ['bwrap']
+    cmd = ["bwrap"]
 
     # Environment variable
-    cmd.extend(['--setenv', 'SBOX', '1'])
+    cmd.extend(["--setenv", "SBOX", "1"])
 
     # Read-only root filesystem
-    cmd.extend(['--ro-bind', '/', '/'])
+    cmd.extend(["--ro-bind", "/", "/"])
 
     # Standard device/proc mounts
-    cmd.extend(['--dev', '/dev'])
-    cmd.extend(['--proc', '/proc'])
+    cmd.extend(["--dev", "/dev"])
+    cmd.extend(["--proc", "/proc"])
 
     # Workspace as read-write
-    cmd.extend(['--bind', str(workspace), str(workspace)])
+    cmd.extend(["--bind", str(workspace), str(workspace)])
 
     # Tool-specific mounts
     for mount_path in TOOL_MOUNTS[tool]:
         path = expand_and_validate_path(mount_path)
         if path:
-            cmd.extend(['--bind', str(path), str(path)])
+            cmd.extend(["--bind", str(path), str(path)])
         else:
-            print(f"Warning: Tool mount path not found, skipping: {mount_path}",
-                  file=sys.stderr)
+            print(
+                f"Warning: Tool mount path not found, skipping: {mount_path}",
+                file=sys.stderr,
+            )
 
     # Common read-write mounts
     for mount_path in COMMON_RW_MOUNTS:
         path = expand_and_validate_path(mount_path)
         if path:
-            cmd.extend(['--bind', str(path), str(path)])
+            cmd.extend(["--bind", str(path), str(path)])
         else:
-            print(f"Warning: Common mount path not found, skipping: {mount_path}",
-                  file=sys.stderr)
+            print(
+                f"Warning: Common mount path not found, skipping: {mount_path}",
+                file=sys.stderr,
+            )
 
     # Ad-hoc read-write mounts
     for rw_path in rw_paths:
         path = expand_and_validate_path(rw_path)
         if path:
-            cmd.extend(['--bind', str(path), str(path)])
+            cmd.extend(["--bind", str(path), str(path)])
         else:
             print(f"Error: --rw path not found: {rw_path}", file=sys.stderr)
             sys.exit(1)
 
     # Isolation and network
-    cmd.extend(['--unshare-all'])
-    cmd.extend(['--share-net'])
-    cmd.extend(['--die-with-parent'])
+    cmd.extend(["--unshare-all"])
+    cmd.extend(["--share-net"])
+    cmd.extend(["--die-with-parent"])
 
     # Working directory
-    cmd.extend(['--chdir', str(work_dir)])
+    cmd.extend(["--chdir", str(work_dir)])
 
     # The command to run
     cmd.append(command)
@@ -181,25 +203,33 @@ def build_bwrap_command(workspace: Path, tool: str, rw_paths: list[str],
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run commands in a bubblewrap sandbox with workspace isolation',
+        description="Run commands in a bubblewrap sandbox with workspace isolation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sbox claude --help # Auto-detect workspace and tool
-  sbox --tool none bash # No tool-specific mounts
-  sbox --workspace /path bash # Explicit workspace
+  sbox claude --help                    # Auto-detect workspace and tool
+  sbox --tool none bash                 # No tool-specific mounts
+  sbox --workspace /path bash           # Explicit workspace
   sbox --rw ~/.ssh --tool none git push # Additional read-write mount
-"""
+        """,
     )
-    parser.add_argument('--workspace', type=Path, help='Explicit workspace path')
-    parser.add_argument('--tool', choices=list(TOOL_MOUNTS.keys()),
-                        help='Tool to configure mounts for')
-    parser.add_argument('--rw', action='append', default=[],
-                        help='Additional read-write mount (repeatable)')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Print bwrap command instead of executing')
-    parser.add_argument('command', help='Command to run')
-    parser.add_argument('args', nargs='*', help='Arguments for command')
+    parser.add_argument("--workspace", type=Path, help="Explicit workspace path")
+    parser.add_argument(
+        "--tool", choices=list(TOOL_MOUNTS.keys()), help="Tool to configure mounts for"
+    )
+    parser.add_argument(
+        "--rw",
+        action="append",
+        default=[],
+        help="Additional read-write mount (repeatable)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print bwrap command instead of executing",
+    )
+    parser.add_argument("command", help="Command to run")
+    parser.add_argument("args", nargs="*", help="Arguments for command")
 
     args = parser.parse_args()
 
@@ -215,22 +245,22 @@ Examples:
     else:
         workspace = find_workspace_via_markers(Path.cwd())
 
-        if not workspace:
-            workspace = find_workspace_via_git(Path.cwd())
+    if not workspace:
+        workspace = find_workspace_via_git(Path.cwd())
 
-        if not workspace:
-            print("Error: Could not detect workspace", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("Workspace detection attempts (in order):", file=sys.stderr)
-            print(f" 1. --workspace flag (not provided)", file=sys.stderr)
-            print(f" 2. Marker files {MARKER_FILES} (not found)", file=sys.stderr)
-            print(f" 3. Git repository root (not found)", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("Solutions:", file=sys.stderr)
-            print(" - Run from within a git repository", file=sys.stderr)
-            print(" - Create a marker file (e.g., .sandbox-workspace)", file=sys.stderr)
-            print(" - Use --workspace /path/to/workspace", file=sys.stderr)
-            sys.exit(1)
+    if not workspace:
+        print("Error: Could not detect workspace", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Workspace detection attempts (in order):", file=sys.stderr)
+        print(f"  1. --workspace flag (not provided)", file=sys.stderr)
+        print(f"  2. Marker files {MARKER_FILES} (not found)", file=sys.stderr)
+        print(f"  3. Git repository root (not found)", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Solutions:", file=sys.stderr)
+        print("  - Run from within a git repository", file=sys.stderr)
+        print("  - Create a marker file (e.g., .sandbox-workspace)", file=sys.stderr)
+        print("  - Use --workspace /path/to/workspace", file=sys.stderr)
+        sys.exit(1)
 
     # Tool detection
     tool = detect_tool(args.tool, args.command)
@@ -242,20 +272,21 @@ Examples:
     except ValueError:
         # cwd is not under workspace
         print(f"Error: Current directory must be under workspace", file=sys.stderr)
-        print(f" Workspace: {workspace}", file=sys.stderr)
-        print(f" Current: {work_dir.resolve()}", file=sys.stderr)
+        print(f"  Workspace: {workspace}", file=sys.stderr)
+        print(f"  Current:   {work_dir.resolve()}", file=sys.stderr)
         sys.exit(1)
 
     # Build command
-    bwrap_cmd = build_bwrap_command(workspace, tool, args.rw,
-                                    work_dir, args.command, args.args)
+    bwrap_cmd = build_bwrap_command(
+        workspace, tool, args.rw, work_dir, args.command, args.args
+    )
 
     if args.dry_run:
-        print(' '.join(bwrap_cmd))
+        print(" ".join(bwrap_cmd))
         return 0
 
     # Execute command - single line output
-    if rel_path == Path('.'):
+    if rel_path == Path("."):
         # cwd is workspace root
         print(f"sbox [{tool}]: {workspace}", file=sys.stderr)
     else:
@@ -263,16 +294,16 @@ Examples:
         print(f"sbox [{tool}]: {workspace} ({rel_path})", file=sys.stderr)
 
     try:
-        result = subprocess.run(bwrap_cmd)
-        return result.returncode
+        # Replace this process with bwrap; main() does not return on success.
+        os.execvp("bwrap", bwrap_cmd)
     except FileNotFoundError:
-        print("Error: Failed to execute bwrap (this should not happen after check)",
-              file=sys.stderr)
+        print(
+            "Error: Failed to execute bwrap (this should not happen after check)",
+            file=sys.stderr,
+        )
         return 1
-    except KeyboardInterrupt:
-        print("\nInterrupted", file=sys.stderr)
-        return 130
+    # unreachable
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
