@@ -37,6 +37,9 @@ TOOL_MOUNTS = {
         "~/.claude",
         "~/.claude.json",
     ],
+    "codex": [
+        "~/.codex",
+    ],
     "opencode": [
         "~/.config/opencode",
         "~/.local/share/opencode",
