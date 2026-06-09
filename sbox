@@ -142,8 +142,9 @@ def build_bwrap_command(
     """Build the bubblewrap command line."""
     cmd = ["bwrap"]
 
-    # Environment variable
+    # Environment variables
     cmd.extend(["--setenv", "SBOX", "1"])
+    cmd.extend(["--setenv", "UV_TOOL_DIR", os.path.expanduser("~/.cache/agent-uv-tools")])
 
     # Read-only root filesystem
     cmd.extend(["--ro-bind", "/", "/"])
