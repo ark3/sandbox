@@ -55,7 +55,10 @@ TOOL_MOUNTS = {
     "none": [],
 }
 
-TOOL_MOUNTS["claude-agent-acp"] = TOOL_MOUNTS["claude"]
+# Copy, don't alias: the acp variant shares claude's mounts today, but keeping
+# a distinct list means a future per-variant mount edit can't silently mutate
+# the other entry.
+TOOL_MOUNTS["claude-agent-acp"] = list(TOOL_MOUNTS["claude"])
 
 
 def check_bubblewrap():
@@ -102,6 +105,52 @@ def find_workspace_via_git(start_path: Path) -> Path | None:
         current = parent
 
     return outermost_git_root
+
+
+def resolve_workspace(
+    explicit_workspace: Path | None, work_dir: Path
+) -> tuple[Path, Path]:
+    """Resolve the sandbox workspace root and work_dir's path relative to it.
+
+    Detection order: an explicit ``--workspace``, then a marker file, then the
+    outermost git root. Exits with a diagnostic if no workspace can be found,
+    or if work_dir is not inside the resolved workspace. Returns the resolved
+    ``(workspace, rel_path)``, where ``rel_path`` is ``Path(".")`` when work_dir
+    is the workspace root itself.
+    """
+    if explicit_workspace is not None:
+        workspace = explicit_workspace.resolve()
+        if not workspace.exists():
+            print(f"Error: Workspace path does not exist: {workspace}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        workspace = find_workspace_via_markers(work_dir)
+        if not workspace:
+            workspace = find_workspace_via_git(work_dir)
+
+    if not workspace:
+        print("Error: Could not detect workspace", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Workspace detection attempts (in order):", file=sys.stderr)
+        print(f"  1. --workspace flag (not provided)", file=sys.stderr)
+        print(f"  2. Marker files {MARKER_FILES} (not found)", file=sys.stderr)
+        print(f"  3. Git repository root (not found)", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Solutions:", file=sys.stderr)
+        print("  - Run from within a git repository", file=sys.stderr)
+        print("  - Create a marker file (e.g., .sandbox-workspace)", file=sys.stderr)
+        print("  - Use --workspace /path/to/workspace", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        rel_path = work_dir.resolve().relative_to(workspace.resolve())
+    except ValueError:
+        print(f"Error: Current directory must be under workspace", file=sys.stderr)
+        print(f"  Workspace: {workspace}", file=sys.stderr)
+        print(f"  Current:   {work_dir.resolve()}", file=sys.stderr)
+        sys.exit(1)
+
+    return workspace, rel_path
 
 
 def detect_tool(explicit_tool: str | None, command: str) -> str:
@@ -207,14 +256,19 @@ def build_bwrap_command(
 
 def main():
     parser = argparse.ArgumentParser(
+        usage="%(prog)s [OPTIONS] COMMAND [ARGS...]",
         description="Run commands in a bubblewrap sandbox with workspace isolation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+The first bare word is the COMMAND; everything after it is passed through to
+the command untouched, so the command's own flags need no `--` guard.
+
 Examples:
-  sbox claude --help                    # Auto-detect workspace and tool
+  sbox claude --resume UUID             # Flags after the command pass through
   sbox --tool none bash                 # No tool-specific mounts
   sbox --workspace /path bash           # Explicit workspace
   sbox --rw ~/.ssh --tool none git push # Additional read-write mount
+  sbox -- --weird-command               # `--` still works as a hard separator
         """,
     )
     parser.add_argument("--workspace", type=Path, help="Explicit workspace path")
@@ -233,56 +287,28 @@ Examples:
         help="Print bwrap command instead of executing",
     )
     parser.add_argument("command", help="Command to run")
-    parser.add_argument("args", nargs="*", help="Arguments for command")
+    # REMAINDER stops option parsing at the command, so every token after it is
+    # captured verbatim -- the command's own flags are never mistaken for
+    # sbox's, and no `--` guard is required.
+    parser.add_argument(
+        "args", nargs=argparse.REMAINDER, help="Arguments passed to the command"
+    )
 
     args = parser.parse_args()
+    command, command_args = args.command, args.args
 
     check_bubblewrap()
 
     # Workspace detection
-    workspace = None
-    if args.workspace:
-        workspace = args.workspace.resolve()
-        if not workspace.exists():
-            print(f"Error: Workspace path does not exist: {workspace}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        workspace = find_workspace_via_markers(Path.cwd())
-
-    if not workspace:
-        workspace = find_workspace_via_git(Path.cwd())
-
-    if not workspace:
-        print("Error: Could not detect workspace", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Workspace detection attempts (in order):", file=sys.stderr)
-        print(f"  1. --workspace flag (not provided)", file=sys.stderr)
-        print(f"  2. Marker files {MARKER_FILES} (not found)", file=sys.stderr)
-        print(f"  3. Git repository root (not found)", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Solutions:", file=sys.stderr)
-        print("  - Run from within a git repository", file=sys.stderr)
-        print("  - Create a marker file (e.g., .sandbox-workspace)", file=sys.stderr)
-        print("  - Use --workspace /path/to/workspace", file=sys.stderr)
-        sys.exit(1)
+    work_dir = Path.cwd()
+    workspace, rel_path = resolve_workspace(args.workspace, work_dir)
 
     # Tool detection
-    tool = detect_tool(args.tool, args.command)
-
-    # Validate cwd is under workspace
-    work_dir = Path.cwd()
-    try:
-        rel_path = work_dir.resolve().relative_to(workspace.resolve())
-    except ValueError:
-        # cwd is not under workspace
-        print(f"Error: Current directory must be under workspace", file=sys.stderr)
-        print(f"  Workspace: {workspace}", file=sys.stderr)
-        print(f"  Current:   {work_dir.resolve()}", file=sys.stderr)
-        sys.exit(1)
+    tool = detect_tool(args.tool, command)
 
     # Build command
     bwrap_cmd = build_bwrap_command(
-        workspace, tool, args.rw, work_dir, args.command, args.args
+        workspace, tool, args.rw, work_dir, command, command_args
     )
 
     if args.dry_run:

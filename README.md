@@ -36,6 +36,14 @@ cp sbox ~/.local/bin/sbox
 sbox [OPTIONS] COMMAND [ARGS...]
 ```
 
+sbox parses only its own options, up to the first bare word (the `COMMAND`). Everything from `COMMAND` onward is passed through to the command untouched, so the command's own flags need no `--` guard:
+
+```sh
+sbox claude --resume UUID     # --resume UUID goes to claude, not sbox
+```
+
+An explicit `--` still works as a hard separator if a command name would otherwise look like an option.
+
 ### Options
 
 | Option | Description |
@@ -61,6 +69,7 @@ The `--tool` option (or auto-detection from the command name) controls which ext
 | Tool | Extra writable paths |
 |---|---|
 | `claude` | `~/.claude`, `~/.claude.json` |
+| `codex` | `~/.codex` |
 | `opencode` | `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` |
 | `none` | _(none)_ |
 
@@ -81,8 +90,18 @@ sbox --workspace ~/projects/myapp --tool none make test
 # Add an extra read-write mount (e.g. to allow git push)
 sbox --rw ~/.ssh --tool none git push
 
-# Use -- to pass options to the sandboxed command itself
-sbox -- claude --help
+# The command's own flags need no -- guard
+sbox claude --resume UUID
 ```
 
 The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment.
+
+## Development
+
+Tests use [pytest](https://docs.pytest.org/) and are run with [`uv`](https://docs.astral.sh/uv/):
+
+```sh
+uv run pytest
+```
+
+`uv` provisions the test dependencies (declared in `pyproject.toml`) automatically — no manual virtualenv setup needed.
