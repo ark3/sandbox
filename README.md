@@ -75,6 +75,22 @@ The `--tool` option (or auto-detection from the command name) controls which ext
 
 If the command name matches a known tool, it's selected automatically. Otherwise, use `--tool` explicitly.
 
+### Tool arguments
+
+Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized tools it injects a default argument ahead of your own:
+
+| Tool | Injected argument |
+|---|---|
+| `claude` | `--permission-mode bypassPermissions` |
+| `codex` | `--sandbox danger-full-access` |
+
+These are single-valued flags, so passing the same flag yourself overrides the default (the last occurrence wins):
+
+```sh
+sbox claude --permission-mode plan    # your value wins over the injected default
+sbox codex --sandbox read-only        # likewise
+```
+
 ## Examples
 
 ```sh

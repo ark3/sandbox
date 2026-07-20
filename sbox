@@ -60,6 +60,19 @@ TOOL_MOUNTS = {
 # the other entry.
 TOOL_MOUNTS["claude-agent-acp"] = list(TOOL_MOUNTS["claude"])
 
+# Default arguments injected before the user's own, per tool. sbox already
+# provides the sandbox, so tell the inner tool not to run its own. These are
+# single-valued flags, so a user-supplied value of the same flag overrides the
+# default (last occurrence wins in both CLIs).
+#
+# Note: claude-agent-acp is intentionally absent even though it shares claude's
+# mounts -- the ACP adapter does not accept --permission-mode, so injecting it
+# would break the command.
+TOOL_ARGS = {
+    "claude": ["--permission-mode", "bypassPermissions"],
+    "codex": ["--sandbox", "danger-full-access"],
+}
+
 
 def check_bubblewrap():
     """Verify bubblewrap is installed."""
@@ -305,6 +318,13 @@ Examples:
 
     # Tool detection
     tool = detect_tool(args.tool, command)
+
+    # Inject the tool's default arguments before the user's own, so a
+    # user-supplied value of the same flag wins; log exactly what we add.
+    tool_args = TOOL_ARGS.get(tool, [])
+    if tool_args:
+        print(f"sbox: adding {tool} args: {' '.join(tool_args)}", file=sys.stderr)
+    command_args = tool_args + command_args
 
     # Build command
     bwrap_cmd = build_bwrap_command(
