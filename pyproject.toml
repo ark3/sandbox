@@ -1,0 +1,11 @@
+[project]
+name = "sbox"
+version = "0.0.0"
+description = "Generic bubblewrap sandbox tool with auto-detection"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
