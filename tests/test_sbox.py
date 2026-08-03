@@ -96,15 +96,6 @@ def test_injection_follows_command_not_profile(run_sbox):
     assert r.stdout.rstrip().endswith("codex --sandbox danger-full-access")
 
 
-def test_tool_is_accepted_as_alias_for_profile(run_sbox):
-    # --tool is the old spelling; keep it working so existing aliases and shell
-    # history don't break.
-    r = run_sbox("--tool", "codex", "bash")
-    assert r.returncode == 0
-    assert "--bind" in r.stdout
-    assert r.stdout.rstrip().endswith("bash")
-
-
 def test_injection_matches_command_basename(run_sbox):
     # An absolute path to the tool is still the tool.
     r = run_sbox("--profile", "codex", "/usr/local/bin/codex")

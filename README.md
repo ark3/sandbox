@@ -49,7 +49,7 @@ An explicit `--` still works as a hard separator if a command name would otherwi
 | Option | Description |
 |---|---|
 | `--workspace PATH` | Explicitly set the workspace root |
-| `--profile NAME` | Select the mount profile (see below); `--tool` is a deprecated alias |
+| `--profile NAME` | Select the mount profile (see below) |
 | `--rw PATH` | Add an extra read-write mount (repeatable) |
 | `--dry-run` | Print the `bwrap` command without running it |
 
@@ -73,7 +73,7 @@ A *profile* is a named set of extra read-write mounts. It controls only what is 
 | `opencode` | `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` |
 | `none` | _(none)_ |
 
-If the command name matches a profile, that profile is selected automatically. Otherwise pass `--profile` explicitly — including `--profile none` for a command that needs no extra mounts.
+If the command name matches a profile, that profile is selected automatically. Otherwise sbox stops and asks rather than guessing: an unrecognized command is an error, and you say `--profile none` to confirm it needs no extra writable paths. This is deliberate — silently running with no profile would let a tool fail deep inside the sandbox on a config directory it couldn't write, which is a far worse error message than the one you get up front.
 
 Exactly one profile applies per run; they don't compose.
 

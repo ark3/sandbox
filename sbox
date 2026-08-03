@@ -242,7 +242,7 @@ def build_bwrap_command(
             cmd.extend(["--bind", str(path), str(path)])
         else:
             print(
-                f"Warning: Tool mount path not found, skipping: {mount_path}",
+                f"Warning: Profile mount path not found, skipping: {mount_path}",
                 file=sys.stderr,
             )
 
@@ -306,16 +306,20 @@ Examples:
     parser.add_argument("--workspace", type=Path, help="Explicit workspace path")
     parser.add_argument(
         "--profile",
-        "--tool",
         choices=list(PROFILE_MOUNTS.keys()),
-        # An explicit metavar keeps --help to one copy of the choices list;
-        # argparse would otherwise print the full set once per option string.
+        # An explicit metavar keeps --help to one copy of the choices list.
         metavar="NAME",
-        help=(
-            "Mount profile to apply: "
-            + ", ".join(PROFILE_MOUNTS)
-            + " (--tool is a deprecated alias)"
-        ),
+        help="Mount profile to apply: " + ", ".join(PROFILE_MOUNTS),
+    )
+    # --tool was this option's original name. Kept working so existing shell
+    # aliases and history don't break, but deliberately silent: undocumented,
+    # absent from --help, and not pinned by a test, so it can be deleted
+    # whenever it stops earning its keep.
+    parser.add_argument(
+        "--tool",
+        dest="profile",
+        choices=list(PROFILE_MOUNTS.keys()),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--rw",
