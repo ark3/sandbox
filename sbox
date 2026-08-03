@@ -32,7 +32,11 @@ COMMON_RW_MOUNTS = [
     "~/.sonar/cache",
 ]
 
-TOOL_MOUNTS = {
+# Profiles: named sets of extra read-write mounts, selected by --profile or
+# auto-detected from the command name. A profile decides only what is writable
+# -- it does not decide what runs, and it does not decide which arguments get
+# injected (see COMMAND_ARGS below).
+PROFILE_MOUNTS = {
     "claude": [
         "~/.claude",
         "~/.claude.json",
@@ -58,14 +62,14 @@ TOOL_MOUNTS = {
 # Copy, don't alias: the acp variant shares claude's mounts today, but keeping
 # a distinct list means a future per-variant mount edit can't silently mutate
 # the other entry.
-TOOL_MOUNTS["claude-agent-acp"] = list(TOOL_MOUNTS["claude"])
+PROFILE_MOUNTS["claude-agent-acp"] = list(PROFILE_MOUNTS["claude"])
 
 # Default arguments injected before the user's own, keyed by COMMAND NAME (not
-# by --tool). sbox already provides the sandbox, so tell the inner tool not to
-# run its own. These are single-valued flags, so a user-supplied value of the
-# same flag overrides the default (last occurrence wins in both CLIs).
+# by --profile). sbox already provides the sandbox, so tell the inner tool not
+# to run its own. These are single-valued flags, so a user-supplied value of
+# the same flag overrides the default (last occurrence wins in both CLIs).
 #
-# Keying on the command is what makes `sbox --tool codex bash` work: you get
+# Keying on the command is what makes `sbox --profile codex bash` work: you get
 # codex's mounts for a shell you launch codex from yourself, without bash being
 # handed --sandbox danger-full-access, which it would reject.
 #
@@ -170,26 +174,32 @@ def resolve_workspace(
     return workspace, rel_path
 
 
-def detect_tool(explicit_tool: str | None, command: str) -> str:
-    """Detect which tool to configure mounts for."""
-    if explicit_tool:
-        return explicit_tool
+def resolve_profile(explicit_profile: str | None, command: str) -> str:
+    """Resolve which mount profile to apply."""
+    if explicit_profile:
+        return explicit_profile
 
     # Auto-detect from command name
-    if command in TOOL_MOUNTS:
+    if command in PROFILE_MOUNTS:
         return command
 
-    # Not recognized
-    print(f"Error: Unrecognized tool '{command}'", file=sys.stderr)
+    # Not recognized. The command itself is fine -- sbox just has no mount
+    # profile for it, and won't guess which extra paths it should be able to
+    # write.
+    print(f"Error: No mount profile for '{command}'", file=sys.stderr)
     print("", file=sys.stderr)
-    print(f"Supported tools: {', '.join(TOOL_MOUNTS.keys())}", file=sys.stderr)
+    print(f"Available profiles: {', '.join(PROFILE_MOUNTS.keys())}", file=sys.stderr)
     print("", file=sys.stderr)
     print("Solutions:", file=sys.stderr)
     print(
-        f"  - Use --tool to explicitly specify: sbox --tool none {command}",
+        f"  - Run with no extra mounts: sbox --profile none {command}",
         file=sys.stderr,
     )
-    print(f"  - Add '{command}' to TOOL_MOUNTS in {__file__}", file=sys.stderr)
+    print(
+        f"  - Borrow another tool's mounts: sbox --profile codex {command}",
+        file=sys.stderr,
+    )
+    print(f"  - Add '{command}' to PROFILE_MOUNTS in {__file__}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -202,7 +212,7 @@ def expand_and_validate_path(path_str: str) -> Path | None:
 
 def build_bwrap_command(
     workspace: Path,
-    tool: str,
+    profile: str,
     rw_paths: list[str],
     work_dir: Path,
     command: str,
@@ -225,8 +235,8 @@ def build_bwrap_command(
     # Workspace as read-write
     cmd.extend(["--bind", str(workspace), str(workspace)])
 
-    # Tool-specific mounts
-    for mount_path in TOOL_MOUNTS[tool]:
+    # Profile mounts
+    for mount_path in PROFILE_MOUNTS[profile]:
         path = expand_and_validate_path(mount_path)
         if path:
             cmd.extend(["--bind", str(path), str(path)])
@@ -280,18 +290,32 @@ def main():
 The first bare word is the COMMAND; everything after it is passed through to
 the command untouched, so the command's own flags need no `--` guard.
 
+A --profile selects extra writable paths only; it does not decide what runs.
+Sandbox-disabling flags are injected based on the COMMAND, so a shell run under
+a tool's profile stays a plain shell.
+
 Examples:
-  sbox claude --resume UUID             # Flags after the command pass through
-  sbox --tool none bash                 # No tool-specific mounts
-  sbox --tool codex bash                # Codex's mounts, plain shell, no injection
-  sbox --workspace /path bash           # Explicit workspace
-  sbox --rw ~/.ssh --tool none git push # Additional read-write mount
-  sbox -- --weird-command               # `--` still works as a hard separator
+  sbox claude --resume UUID                # Flags after the command pass through
+  sbox --profile none bash                 # No profile mounts
+  sbox --profile codex bash                # Codex's mounts, plain shell, no injection
+  sbox --workspace /path bash              # Explicit workspace
+  sbox --rw ~/.ssh --profile none git push # Additional read-write mount
+  sbox -- --weird-command                  # `--` still works as a hard separator
         """,
     )
     parser.add_argument("--workspace", type=Path, help="Explicit workspace path")
     parser.add_argument(
-        "--tool", choices=list(TOOL_MOUNTS.keys()), help="Tool to configure mounts for"
+        "--profile",
+        "--tool",
+        choices=list(PROFILE_MOUNTS.keys()),
+        # An explicit metavar keeps --help to one copy of the choices list;
+        # argparse would otherwise print the full set once per option string.
+        metavar="NAME",
+        help=(
+            "Mount profile to apply: "
+            + ", ".join(PROFILE_MOUNTS)
+            + " (--tool is a deprecated alias)"
+        ),
     )
     parser.add_argument(
         "--rw",
@@ -321,13 +345,13 @@ Examples:
     work_dir = Path.cwd()
     workspace, rel_path = resolve_workspace(args.workspace, work_dir)
 
-    # Tool detection
-    tool = detect_tool(args.tool, command)
+    # Mount profile
+    profile = resolve_profile(args.profile, command)
 
     # Inject the command's default arguments before the user's own, so a
     # user-supplied value of the same flag wins; log exactly what we add.
     # Lookup is by command basename, so a wrapper command (a shell, make, env
-    # ...) run under a tool's mounts never receives that tool's flags.
+    # ...) run under a tool's profile never receives that tool's flags.
     command_name = Path(command).name
     injected = COMMAND_ARGS.get(command_name, [])
     if injected:
@@ -338,7 +362,7 @@ Examples:
 
     # Build command
     bwrap_cmd = build_bwrap_command(
-        workspace, tool, args.rw, work_dir, command, command_args
+        workspace, profile, args.rw, work_dir, command, command_args
     )
 
     if args.dry_run:
@@ -348,10 +372,10 @@ Examples:
     # Execute command - single line output
     if rel_path == Path("."):
         # cwd is workspace root
-        print(f"sbox [{tool}]: {workspace}", file=sys.stderr)
+        print(f"sbox [{profile}]: {workspace}", file=sys.stderr)
     else:
         # cwd is subdirectory
-        print(f"sbox [{tool}]: {workspace} ({rel_path})", file=sys.stderr)
+        print(f"sbox [{profile}]: {workspace} ({rel_path})", file=sys.stderr)
 
     try:
         # Replace this process with bwrap; main() does not return on success.

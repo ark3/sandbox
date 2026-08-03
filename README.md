@@ -7,7 +7,7 @@ A lightweight sandbox wrapper using [bubblewrap](https://github.com/containers/b
 - The entire filesystem is mounted read-only
 - Your workspace directory is mounted read-write
 - A set of common cache directories (npm, gradle, ~/.cache, etc.) are also writable
-- Tool-specific config directories get write access based on the command being run
+- A mount profile adds write access to one tool's config directories, picked automatically from the command being run or set with `--profile`
 - Network access is preserved
 
 ## Requirements
@@ -49,7 +49,7 @@ An explicit `--` still works as a hard separator if a command name would otherwi
 | Option | Description |
 |---|---|
 | `--workspace PATH` | Explicitly set the workspace root |
-| `--tool TOOL` | Configure mounts for a specific tool (see below) |
+| `--profile NAME` | Select the mount profile (see below); `--tool` is a deprecated alias |
 | `--rw PATH` | Add an extra read-write mount (repeatable) |
 | `--dry-run` | Print the `bwrap` command without running it |
 
@@ -62,18 +62,20 @@ The workspace root is detected automatically (unless `--workspace` is given):
 
 The current directory must be inside the workspace.
 
-### Tool presets
+### Mount profiles
 
-The `--tool` option (or auto-detection from the command name) controls which extra directories get write access:
+A *profile* is a named set of extra read-write mounts. It controls only what is writable — it does not decide what runs, and it does not decide which arguments get injected. Select one with `--profile`, or let it be auto-detected from the command name:
 
-| Tool | Extra writable paths |
+| Profile | Extra writable paths |
 |---|---|
 | `claude` | `~/.claude`, `~/.claude.json` |
 | `codex` | `~/.codex` |
 | `opencode` | `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` |
 | `none` | _(none)_ |
 
-If the command name matches a known tool, it's selected automatically. Otherwise, use `--tool` explicitly.
+If the command name matches a profile, that profile is selected automatically. Otherwise pass `--profile` explicitly — including `--profile none` for a command that needs no extra mounts.
+
+Exactly one profile applies per run; they don't compose.
 
 ### Command arguments
 
@@ -84,10 +86,10 @@ Because sbox already provides the sandbox, it tells the inner tool not to run it
 | `claude` | `--permission-mode bypassPermissions` |
 | `codex` | `--sandbox danger-full-access` |
 
-Injection is keyed on the **command you run**, not on `--tool`. That means you can borrow a tool's mounts for something else without the tool's flags coming along:
+Injection is keyed on the **command you run**, not on `--profile`. That means you can borrow a tool's mounts for something else without the tool's flags coming along:
 
 ```sh
-sbox --tool codex bash   # ~/.codex is writable; bash gets no --sandbox flag
+sbox --profile codex bash   # ~/.codex is writable; bash gets no --sandbox flag
 ```
 
 Inside that shell you can export whatever you like and launch `codex` yourself, with full control over its arguments.
@@ -105,14 +107,17 @@ sbox codex --sandbox read-only        # likewise
 # Run claude with auto-detected workspace
 sbox claude
 
-# Run an arbitrary command with no tool-specific mounts
-sbox --tool none bash
+# Run an arbitrary command with no profile mounts
+sbox --profile none bash
 
 # Explicit workspace
-sbox --workspace ~/projects/myapp --tool none make test
+sbox --workspace ~/projects/myapp --profile none make test
 
 # Add an extra read-write mount (e.g. to allow git push)
-sbox --rw ~/.ssh --tool none git push
+sbox --rw ~/.ssh --profile none git push
+
+# Open a shell with Codex's mounts, then launch codex yourself
+sbox --profile codex bash
 
 # The command's own flags need no -- guard
 sbox claude --resume UUID
