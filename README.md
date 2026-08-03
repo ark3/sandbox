@@ -75,14 +75,22 @@ The `--tool` option (or auto-detection from the command name) controls which ext
 
 If the command name matches a known tool, it's selected automatically. Otherwise, use `--tool` explicitly.
 
-### Tool arguments
+### Command arguments
 
-Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized tools it injects a default argument ahead of your own:
+Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized commands it injects a default argument ahead of your own:
 
-| Tool | Injected argument |
+| Command | Injected argument |
 |---|---|
 | `claude` | `--permission-mode bypassPermissions` |
 | `codex` | `--sandbox danger-full-access` |
+
+Injection is keyed on the **command you run**, not on `--tool`. That means you can borrow a tool's mounts for something else without the tool's flags coming along:
+
+```sh
+sbox --tool codex bash   # ~/.codex is writable; bash gets no --sandbox flag
+```
+
+Inside that shell you can export whatever you like and launch `codex` yourself, with full control over its arguments.
 
 These are single-valued flags, so passing the same flag yourself overrides the default (the last occurrence wins):
 

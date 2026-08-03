@@ -60,15 +60,19 @@ TOOL_MOUNTS = {
 # the other entry.
 TOOL_MOUNTS["claude-agent-acp"] = list(TOOL_MOUNTS["claude"])
 
-# Default arguments injected before the user's own, per tool. sbox already
-# provides the sandbox, so tell the inner tool not to run its own. These are
-# single-valued flags, so a user-supplied value of the same flag overrides the
-# default (last occurrence wins in both CLIs).
+# Default arguments injected before the user's own, keyed by COMMAND NAME (not
+# by --tool). sbox already provides the sandbox, so tell the inner tool not to
+# run its own. These are single-valued flags, so a user-supplied value of the
+# same flag overrides the default (last occurrence wins in both CLIs).
+#
+# Keying on the command is what makes `sbox --tool codex bash` work: you get
+# codex's mounts for a shell you launch codex from yourself, without bash being
+# handed --sandbox danger-full-access, which it would reject.
 #
 # Note: claude-agent-acp is intentionally absent even though it shares claude's
 # mounts -- the ACP adapter does not accept --permission-mode, so injecting it
 # would break the command.
-TOOL_ARGS = {
+COMMAND_ARGS = {
     "claude": ["--permission-mode", "bypassPermissions"],
     "codex": ["--sandbox", "danger-full-access"],
 }
@@ -279,6 +283,7 @@ the command untouched, so the command's own flags need no `--` guard.
 Examples:
   sbox claude --resume UUID             # Flags after the command pass through
   sbox --tool none bash                 # No tool-specific mounts
+  sbox --tool codex bash                # Codex's mounts, plain shell, no injection
   sbox --workspace /path bash           # Explicit workspace
   sbox --rw ~/.ssh --tool none git push # Additional read-write mount
   sbox -- --weird-command               # `--` still works as a hard separator
@@ -319,12 +324,17 @@ Examples:
     # Tool detection
     tool = detect_tool(args.tool, command)
 
-    # Inject the tool's default arguments before the user's own, so a
+    # Inject the command's default arguments before the user's own, so a
     # user-supplied value of the same flag wins; log exactly what we add.
-    tool_args = TOOL_ARGS.get(tool, [])
-    if tool_args:
-        print(f"sbox: adding {tool} args: {' '.join(tool_args)}", file=sys.stderr)
-    command_args = tool_args + command_args
+    # Lookup is by command basename, so a wrapper command (a shell, make, env
+    # ...) run under a tool's mounts never receives that tool's flags.
+    command_name = Path(command).name
+    injected = COMMAND_ARGS.get(command_name, [])
+    if injected:
+        print(
+            f"sbox: adding {command_name} args: {' '.join(injected)}", file=sys.stderr
+        )
+    command_args = injected + command_args
 
     # Build command
     bwrap_cmd = build_bwrap_command(

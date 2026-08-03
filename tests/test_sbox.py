@@ -6,6 +6,9 @@ pure business logic (tool detection and workspace resolution). Argument
 splitting itself is argparse's job now (nargs=REMAINDER), so it isn't unit
 tested here -- the end-to-end tests pin the behavior we rely on.
 
+Injection is keyed on the command name, not on --tool; the tests below pin
+both halves of that split.
+
 Run with `uv run pytest`.
 """
 
@@ -73,6 +76,33 @@ def test_tool_none_injects_nothing(run_sbox):
     assert r.returncode == 0
     assert "adding" not in r.stderr
     assert r.stdout.rstrip().endswith("bash")
+
+
+def test_tool_preset_does_not_inject_into_other_command(run_sbox):
+    # The point of keying injection on the command: borrow codex's mounts to
+    # run a shell, and bash must not be handed --sandbox danger-full-access.
+    r = run_sbox("--tool", "codex", "bash")
+    assert r.returncode == 0
+    assert "--sandbox" not in r.stdout
+    assert "adding" not in r.stderr
+    assert r.stdout.rstrip().endswith("bash")
+
+
+def test_injection_follows_command_not_tool_preset(run_sbox):
+    # Converse of the above: --tool none drops codex's mounts but the command
+    # is still codex, so it still must not run its own sandbox.
+    r = run_sbox("--tool", "none", "codex")
+    assert r.returncode == 0
+    assert r.stdout.rstrip().endswith("codex --sandbox danger-full-access")
+
+
+def test_injection_matches_command_basename(run_sbox):
+    # An absolute path to the tool is still the tool.
+    r = run_sbox("--tool", "codex", "/usr/local/bin/codex")
+    assert r.returncode == 0
+    assert r.stdout.rstrip().endswith(
+        "/usr/local/bin/codex --sandbox danger-full-access"
+    )
 
 
 def test_acp_variant_gets_no_injection(run_sbox):
