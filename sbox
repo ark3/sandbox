@@ -27,10 +27,31 @@ COMMON_RW_MOUNTS = [
     "~/.bun/install/cache",
     "~/.config/agents",
     "~/.gradle/caches",
-    "~/.m2/repository/.cache",
     "~/.npm",
     "~/.sonar/cache",
 ]
+
+# Redirects, DEST -> SRC: sandbox-private storage bind-mounted over the path a
+# tool expects, so the tool needs no configuration and the real directory stays
+# invisible and unmodified.
+#
+# Prefer a tool's own configuration knob (see UV_TOOL_DIR in
+# build_bwrap_command) over a redirect: an env var announces itself to anyone
+# debugging inside the sandbox, while a redirect makes a path silently mean
+# something else. Reach for a redirect when the path is a hardcoded convention
+# with several consumers, or when the tool's knob is unreliable or unavailable.
+#
+# Maven qualifies on both counts. `mvn install` writes the built artifact into
+# ~/.m2/repository, which is outside the workspace and therefore read-only, so
+# installs fail outright; and that path is baked into mvn, mvnw, Gradle's
+# mavenLocal() and IDEs alike. Its only env knobs are MAVEN_OPTS (JVM flags --
+# clobbers heap settings) and MAVEN_ARGS (Maven 3.9+ only).
+#
+# Only ~/.m2/repository is redirected, so ~/.m2/settings.xml stays readable and
+# internal mirrors and credentials keep working.
+REDIRECTS = {
+    "~/.m2/repository": "~/.cache/agent-m2",
+}
 
 # Profiles: named sets of extra read-write mounts, selected by --profile or
 # auto-detected from the command name. A profile decides only what is writable
@@ -203,6 +224,20 @@ def resolve_profile(explicit_profile: str | None, command: str) -> str:
     sys.exit(1)
 
 
+def create_redirect_dirs():
+    """Create both ends of every redirect on the host.
+
+    bwrap needs the source to exist to bind it, and needs the destination to
+    exist as a mount point -- with ``--ro-bind / /`` it cannot create one on the
+    read-only root. This is the only place sbox writes outside the sandbox, so
+    it is kept off the --dry-run path; a dry-run command pasted into a shell may
+    need these directories created first.
+    """
+    for dest_spec, src_spec in REDIRECTS.items():
+        Path(os.path.expanduser(src_spec)).mkdir(parents=True, exist_ok=True)
+        Path(os.path.expanduser(dest_spec)).mkdir(parents=True, exist_ok=True)
+
+
 def expand_and_validate_path(path_str: str) -> Path | None:
     """Expand ~ and env vars, return Path if exists, None otherwise."""
     expanded = os.path.expanduser(os.path.expandvars(path_str))
@@ -256,6 +291,16 @@ def build_bwrap_command(
                 f"Warning: Common mount path not found, skipping: {mount_path}",
                 file=sys.stderr,
             )
+
+    # Redirects. After the common mounts, so an entry above cannot re-expose a
+    # slice of the real directory on top of the redirect, and before --rw, so an
+    # explicit user mount still wins. Emitted whether or not the paths exist:
+    # create_redirect_dirs() makes them on the way to exec, and --dry-run should
+    # still show the redirect it would apply.
+    for dest_spec, src_spec in REDIRECTS.items():
+        dest = os.path.expanduser(dest_spec)
+        src = os.path.expanduser(src_spec)
+        cmd.extend(["--bind", src, dest])
 
     # Ad-hoc read-write mounts
     for rw_path in rw_paths:
@@ -372,6 +417,8 @@ Examples:
     if args.dry_run:
         print(" ".join(bwrap_cmd))
         return 0
+
+    create_redirect_dirs()
 
     # Execute command - single line output
     if rel_path == Path("."):

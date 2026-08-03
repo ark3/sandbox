@@ -120,6 +120,74 @@ def test_no_command_errors(run_sbox):
     assert "command" in r.stderr
 
 
+# --- redirects --------------------------------------------------------------
+# ~/.m2/repository is bind-mounted from ~/.cache/agent-m2 so `mvn install` has
+# somewhere to write without exposing the real local repository.
+
+
+def _bwrap_args(stdout: str) -> list[str]:
+    return stdout.rstrip().split(" ")
+
+
+def test_maven_repo_is_redirected(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert f"--bind {home}/.cache/agent-m2 {home}/.m2/repository" in r.stdout
+
+
+def test_dry_run_creates_no_directories(run_sbox, tmp_path):
+    # create_redirect_dirs() is the only thing sbox writes outside the sandbox,
+    # and it must stay off the --dry-run path.
+    home = tmp_path / "home"
+    home.mkdir()
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert not (home / ".m2").exists()
+    assert not (home / ".cache" / "agent-m2").exists()
+
+
+def test_redirect_comes_after_common_mounts(run_sbox, tmp_path):
+    # Order matters: a common mount landing after the redirect could re-expose
+    # part of the real ~/.m2 on top of it.
+    home = tmp_path / "home"
+    (home / ".cache").mkdir(parents=True)
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    argv = _bwrap_args(r.stdout)
+    assert argv.index(f"{home}/.cache/agent-m2") > argv.index(f"{home}/.cache")
+
+
+def test_explicit_rw_wins_over_redirect(run_sbox, tmp_path):
+    # --rw is applied last, so a user who really wants the real repository can
+    # mount it back over the redirect.
+    home = tmp_path / "home"
+    real_repo = home / ".m2" / "repository"
+    real_repo.mkdir(parents=True)
+    r = run_sbox(
+        "--rw", str(real_repo), "--profile", "none", "bash",
+        extra_env={"HOME": str(home)},
+    )
+    argv = _bwrap_args(r.stdout)
+    # The redirect's own `--bind AGENT_M2 REAL_REPO` also mentions real_repo, so
+    # match the --rw bind by its distinctive src==dest shape rather than by the
+    # first occurrence of the path.
+    rw_bind = [
+        i
+        for i in range(len(argv) - 2)
+        if argv[i : i + 3] == ["--bind", str(real_repo), str(real_repo)]
+    ]
+    assert len(rw_bind) == 1
+    assert rw_bind[0] > argv.index(f"{home}/.cache/agent-m2")
+
+
+def test_real_m2_cache_is_not_mounted(run_sbox, tmp_path):
+    # The old ~/.m2/repository/.cache entry would punch a hole through the
+    # redirect; it must be gone from COMMON_RW_MOUNTS.
+    home = tmp_path / "home"
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert f"{home}/.m2/repository/.cache" not in r.stdout
+
+
 # --- resolve_profile --------------------------------------------------------
 
 

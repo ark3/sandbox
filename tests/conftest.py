@@ -31,7 +31,9 @@ def sbox():
 def run_sbox(tmp_path):
     """Run the real ``sbox --dry-run`` in a throwaway git workspace.
 
-    Returns ``callable(*args) -> CompletedProcess``. ``--dry-run`` prints the
+    Returns ``callable(*args, extra_env=None) -> CompletedProcess``; extra_env
+    overlays the child's environment, e.g. to point HOME at a throwaway
+    directory. ``--dry-run`` prints the
     assembled bwrap command to stdout instead of executing it; check_bubblewrap
     still needs bwrap on PATH, so a no-op stub is provided. The working
     directory is a git root so workspace detection succeeds.
@@ -48,11 +50,11 @@ def run_sbox(tmp_path):
 
     env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
 
-    def _run(*args):
+    def _run(*args, extra_env=None):
         return subprocess.run(
             [sys.executable, str(SBOX_PATH), "--dry-run", *args],
             cwd=workspace,
-            env=env,
+            env={**env, **(extra_env or {})},
             capture_output=True,
             text=True,
         )
