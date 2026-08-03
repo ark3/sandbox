@@ -77,6 +77,31 @@ If the command name matches a profile, that profile is selected automatically. O
 
 Exactly one profile applies per run; they don't compose.
 
+### Redirects
+
+Some tools write to a fixed path outside the workspace. Rather than making that path writable — which would let a sandboxed agent modify state your normal, unsandboxed work depends on — sbox bind-mounts a sandbox-private directory *over* it:
+
+| Path inside the sandbox | Actually |
+|---|---|
+| `~/.m2/repository` | `~/.cache/agent-m2` |
+
+Maven's local repository is the motivating case: `mvn install`'s whole job is writing the built artifact into `~/.m2/repository`, which is read-only here, so installs fail outright. With the redirect, Maven writes to a repository of its own and your real one is neither visible nor modifiable from inside.
+
+No configuration is needed — `mvn`, `mvnw`, Gradle's `mavenLocal()` and IDEs all find the repository at the path they already expect, on any Maven version. Only the `repository` subtree is replaced, so `~/.m2/settings.xml` stays readable and internal mirrors and credentials keep working.
+
+Two consequences:
+
+- The sandbox repository starts empty and fills up as you build. It persists across runs, so the cost is a slow first build, not a slow every build — but dependencies fetched outside the sandbox don't warm it, and vice versa.
+- Artifacts an agent installs are invisible to your unsandboxed builds. A library `mvn install`ed inside the sandbox won't be found by an `mvn` run outside it.
+
+sbox creates both ends of a redirect on the host if they don't exist — the only case where it writes outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first.
+
+If you genuinely want the real repository inside the sandbox, `--rw` is applied after redirects and wins:
+
+```sh
+sbox --rw ~/.m2/repository claude    # writes land in the real local repository
+```
+
 ### Command arguments
 
 Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized commands it injects a default argument ahead of your own:
