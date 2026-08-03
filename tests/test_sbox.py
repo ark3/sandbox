@@ -1,10 +1,13 @@
 """Tests for sbox.
 
 Two layers: end-to-end tests that drive the real script (argument passthrough
-and tool-arg injection, exactly as a user hits them), and unit tests for the
-pure business logic (tool detection and workspace resolution). Argument
+and argument injection, exactly as a user hits them), and unit tests for the
+pure business logic (profile resolution and workspace resolution). Argument
 splitting itself is argparse's job now (nargs=REMAINDER), so it isn't unit
 tested here -- the end-to-end tests pin the behavior we rely on.
+
+Injection is keyed on the command name, not on --profile; the tests below pin
+both halves of that split.
 
 Run with `uv run pytest`.
 """
@@ -31,14 +34,14 @@ def test_flags_after_command_pass_through(run_sbox):
 def test_command_flag_colliding_with_sbox_flag_is_not_stolen(run_sbox):
     # `--workspace` after the command belongs to the command, not to sbox: it
     # must be forwarded, and sbox's own workspace must stay auto-detected.
-    r = run_sbox("--tool", "none", "bash", "--workspace", "/somewhere")
+    r = run_sbox("--profile", "none", "bash", "--workspace", "/somewhere")
     assert r.returncode == 0
     assert "bash --workspace /somewhere" in r.stdout
     assert "--chdir /somewhere" not in r.stdout  # sbox did not consume it
 
 
 def test_double_dash_still_separates(run_sbox):
-    r = run_sbox("--tool", "none", "--", "bash", "--login")
+    r = run_sbox("--profile", "none", "--", "bash", "--login")
     assert r.returncode == 0
     assert r.stdout.rstrip().endswith("bash --login")
 
@@ -68,11 +71,38 @@ def test_codex_default_injected(run_sbox):
     assert "adding codex args: --sandbox danger-full-access" in r.stderr
 
 
-def test_tool_none_injects_nothing(run_sbox):
-    r = run_sbox("--tool", "none", "bash")
+def test_profile_none_injects_nothing(run_sbox):
+    r = run_sbox("--profile", "none", "bash")
     assert r.returncode == 0
     assert "adding" not in r.stderr
     assert r.stdout.rstrip().endswith("bash")
+
+
+def test_profile_does_not_inject_into_other_command(run_sbox):
+    # The point of keying injection on the command: borrow codex's mounts to
+    # run a shell, and bash must not be handed --sandbox danger-full-access.
+    r = run_sbox("--profile", "codex", "bash")
+    assert r.returncode == 0
+    assert "--sandbox" not in r.stdout
+    assert "adding" not in r.stderr
+    assert r.stdout.rstrip().endswith("bash")
+
+
+def test_injection_follows_command_not_profile(run_sbox):
+    # Converse of the above: --profile none drops codex's mounts but the command
+    # is still codex, so it still must not run its own sandbox.
+    r = run_sbox("--profile", "none", "codex")
+    assert r.returncode == 0
+    assert r.stdout.rstrip().endswith("codex --sandbox danger-full-access")
+
+
+def test_injection_matches_command_basename(run_sbox):
+    # An absolute path to the tool is still the tool.
+    r = run_sbox("--profile", "codex", "/usr/local/bin/codex")
+    assert r.returncode == 0
+    assert r.stdout.rstrip().endswith(
+        "/usr/local/bin/codex --sandbox danger-full-access"
+    )
 
 
 def test_acp_variant_gets_no_injection(run_sbox):
@@ -90,20 +120,20 @@ def test_no_command_errors(run_sbox):
     assert "command" in r.stderr
 
 
-# --- detect_tool ------------------------------------------------------------
+# --- resolve_profile --------------------------------------------------------
 
 
-def test_detect_tool_explicit_wins(sbox):
-    assert sbox.detect_tool("none", "claude") == "none"
+def test_resolve_profile_explicit_wins(sbox):
+    assert sbox.resolve_profile("none", "claude") == "none"
 
 
-def test_detect_tool_auto_from_command(sbox):
-    assert sbox.detect_tool(None, "codex") == "codex"
+def test_resolve_profile_auto_from_command(sbox):
+    assert sbox.resolve_profile(None, "codex") == "codex"
 
 
-def test_detect_tool_unknown_exits(sbox):
+def test_resolve_profile_unknown_exits(sbox):
     with pytest.raises(SystemExit):
-        sbox.detect_tool(None, "not-a-real-tool")
+        sbox.resolve_profile(None, "not-a-real-tool")
 
 
 # --- resolve_workspace: detection order and cwd validation ------------------
