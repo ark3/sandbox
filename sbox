@@ -53,6 +53,24 @@ REDIRECTS = {
     "~/.m2/repository": "~/.cache/agent-m2",
 }
 
+# The SSH directory is replaced with an empty tmpfs, and SSH_AUTH_SOCK is
+# unset alongside it. Unlike a redirect, which hands a tool private storage so
+# it keeps working, this takes capability away: the sandbox cannot read your
+# private keys, and it cannot borrow your identity from a running ssh-agent
+# either. Masking the files alone would not achieve the second -- an agent
+# socket survives --unshare-all, so `git push` would keep authenticating with
+# keys the sandbox can no longer see, and the masking would be theater.
+#
+# A tmpfs rather than a bind of some empty directory: nothing is created on the
+# host, so --dry-run stays free of side effects; the directory is writable, so
+# ssh records a known_hosts entry instead of failing; and nothing left there
+# survives the run.
+#
+# --ssh opts out, exposing the real ~/.ssh (read-only, like the rest of the
+# root) and leaving the agent socket reachable. --rw ~/.ssh is applied later
+# still, and additionally makes the real directory writable.
+SSH_DIR = "~/.ssh"
+
 # Profiles: named sets of extra read-write mounts, selected by --profile or
 # auto-detected from the command name. A profile decides only what is writable
 # -- it does not decide what runs, and it does not decide which arguments get
@@ -249,6 +267,7 @@ def build_bwrap_command(
     workspace: Path,
     profile: str,
     rw_paths: list[str],
+    expose_ssh: bool,
     work_dir: Path,
     command: str,
     args: list[str],
@@ -302,6 +321,18 @@ def build_bwrap_command(
         src = os.path.expanduser(src_spec)
         cmd.extend(["--bind", src, dest])
 
+    # SSH masking. After the redirects and before --rw, so `--rw ~/.ssh` can
+    # still put the real directory back for a run that genuinely needs it. The
+    # tmpfs needs an existing mount point, which a read-only root cannot
+    # supply, so a missing ~/.ssh is skipped -- there is nothing to hide. The
+    # agent socket is dropped either way: it can carry usable keys even when no
+    # key file exists on disk.
+    if not expose_ssh:
+        ssh_dir = expand_and_validate_path(SSH_DIR)
+        if ssh_dir:
+            cmd.extend(["--tmpfs", str(ssh_dir)])
+        cmd.extend(["--unsetenv", "SSH_AUTH_SOCK"])
+
     # Ad-hoc read-write mounts
     for rw_path in rw_paths:
         path = expand_and_validate_path(rw_path)
@@ -344,7 +375,8 @@ Examples:
   sbox --profile none bash                 # No profile mounts
   sbox --profile codex bash                # Codex's mounts, plain shell, no injection
   sbox --workspace /path bash              # Explicit workspace
-  sbox --rw ~/.ssh --profile none git push # Additional read-write mount
+  sbox --ssh --profile none git push       # Expose the real ~/.ssh and agent
+  sbox --rw ~/.cargo --profile none build  # Additional read-write mount
   sbox -- --weird-command                  # `--` still works as a hard separator
         """,
     )
@@ -371,6 +403,12 @@ Examples:
         action="append",
         default=[],
         help="Additional read-write mount (repeatable)",
+    )
+    parser.add_argument(
+        "--ssh",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Expose the real ~/.ssh and ssh-agent (default: an empty directory)",
     )
     parser.add_argument(
         "--dry-run",
@@ -411,7 +449,7 @@ Examples:
 
     # Build command
     bwrap_cmd = build_bwrap_command(
-        workspace, profile, args.rw, work_dir, command, command_args
+        workspace, profile, args.rw, args.ssh, work_dir, command, command_args
     )
 
     if args.dry_run:

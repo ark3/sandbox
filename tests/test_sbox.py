@@ -188,6 +188,77 @@ def test_real_m2_cache_is_not_mounted(run_sbox, tmp_path):
     assert f"{home}/.m2/repository/.cache" not in r.stdout
 
 
+# --- ssh masking ------------------------------------------------------------
+# ~/.ssh is replaced with an empty tmpfs and SSH_AUTH_SOCK is unset, unless
+# --ssh is given.
+
+
+def test_ssh_dir_is_masked_by_default(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert f"--tmpfs {home}/.ssh" in r.stdout
+
+
+def test_ssh_agent_socket_is_dropped_by_default(run_sbox, tmp_path):
+    # Hiding the key files is theater on its own: an agent socket survives
+    # --unshare-all and carries usable keys.
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert "--unsetenv SSH_AUTH_SOCK" in r.stdout
+
+
+def test_ssh_flag_exposes_real_config(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--ssh", "--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert "--tmpfs" not in r.stdout
+    assert "SSH_AUTH_SOCK" not in r.stdout
+
+
+def test_missing_ssh_dir_is_skipped(run_sbox, tmp_path):
+    # A tmpfs needs an existing mount point, and a read-only root cannot supply
+    # one -- but the agent socket must still go, since it can hold keys with no
+    # file on disk.
+    home = tmp_path / "home"
+    home.mkdir()
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert f"--tmpfs {home}/.ssh" not in r.stdout
+    assert "--unsetenv SSH_AUTH_SOCK" in r.stdout
+
+
+def test_masking_creates_no_directories(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert not (home / ".ssh").exists()
+
+
+def test_explicit_rw_wins_over_ssh_mask(run_sbox, tmp_path):
+    # --rw is applied after the mask, so a run that genuinely needs the real
+    # directory -- writable -- can have it back.
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    r = run_sbox(
+        "--rw", str(ssh_dir), "--profile", "none", "bash",
+        extra_env={"HOME": str(home)},
+    )
+    argv = _bwrap_args(r.stdout)
+    rw_bind = [
+        i
+        for i in range(len(argv) - 2)
+        if argv[i : i + 3] == ["--bind", str(ssh_dir), str(ssh_dir)]
+    ]
+    assert len(rw_bind) == 1
+    assert rw_bind[0] > argv.index("--tmpfs")
+
+
 # --- resolve_profile --------------------------------------------------------
 
 

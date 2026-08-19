@@ -8,6 +8,7 @@ A lightweight sandbox wrapper using [bubblewrap](https://github.com/containers/b
 - Your workspace directory is mounted read-write
 - A set of common cache directories (npm, gradle, ~/.cache, etc.) are also writable
 - A mount profile adds write access to one tool's config directories, picked automatically from the command being run or set with `--profile`
+- Your SSH configuration is replaced with an empty directory, and the ssh-agent socket is hidden
 - Network access is preserved
 
 ## Requirements
@@ -51,6 +52,7 @@ An explicit `--` still works as a hard separator if a command name would otherwi
 | `--workspace PATH` | Explicitly set the workspace root |
 | `--profile NAME` | Select the mount profile (see below) |
 | `--rw PATH` | Add an extra read-write mount (repeatable) |
+| `--ssh` | Expose the real `~/.ssh` and ssh-agent (default: an empty directory) |
 | `--dry-run` | Print the `bwrap` command without running it |
 
 ### Workspace detection
@@ -102,6 +104,29 @@ If you genuinely want the real repository inside the sandbox, `--rw` is applied 
 sbox --rw ~/.m2/repository claude    # writes land in the real local repository
 ```
 
+### SSH
+
+The rest of the filesystem is read-only, not invisible — a sandboxed tool can still *read* everything, including your private keys. So `~/.ssh` gets separate treatment: it is replaced with an empty `tmpfs`, and `SSH_AUTH_SOCK` is unset.
+
+Both halves matter. Masking the key files alone would be theater: an ssh-agent socket survives `--unshare-all`, and keys loaded into the agent stay usable through it whether or not the sandbox can see the files they came from.
+
+A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, the directory is writable so `ssh` can record a `known_hosts` entry instead of failing, and nothing written there survives the run.
+
+The practical consequence is that SSH authentication does not work inside the sandbox. `git push` over `ssh` fails; `https` remotes with a credential helper are unaffected. Two other things to expect:
+
+- `known_hosts` starts empty, so the first connection to any host prompts for confirmation — which a non-interactive agent will hang on rather than answer.
+- Host aliases, `ProxyJump` and friends from your `~/.ssh/config` are gone, so connections by alias fail. `/etc/ssh/ssh_config` still applies.
+
+Use `--ssh` for a run that needs your SSH identity. It exposes the real `~/.ssh` read-only, like the rest of the root, and leaves the agent socket reachable:
+
+```sh
+sbox --ssh --profile none git push
+```
+
+`--rw` is applied after the mask, so `--rw ~/.ssh` also puts the real directory back and additionally makes it writable — for `ssh` to append to your real `known_hosts`, say. Note that it does *not* restore the agent socket; combine it with `--ssh` if you want both.
+
+One limitation: if `~/.ssh` is a symlink, the mask covers the directory it points at, so the sandbox still sees an empty `~/.ssh` — but the real directory remains readable under its own path.
+
 ### Command arguments
 
 Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized commands it injects a default argument ahead of your own:
@@ -138,8 +163,11 @@ sbox --profile none bash
 # Explicit workspace
 sbox --workspace ~/projects/myapp --profile none make test
 
-# Add an extra read-write mount (e.g. to allow git push)
-sbox --rw ~/.ssh --profile none git push
+# Expose the real ~/.ssh and ssh-agent (e.g. to allow git push)
+sbox --ssh --profile none git push
+
+# Add an extra read-write mount
+sbox --rw ~/.cargo --profile none cargo build
 
 # Open a shell with Codex's mounts, then launch codex yourself
 sbox --profile codex bash
