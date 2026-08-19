@@ -8,7 +8,7 @@ A lightweight sandbox wrapper using [bubblewrap](https://github.com/containers/b
 - Your workspace directory is mounted read-write
 - A set of common cache directories (npm, gradle, ~/.cache, etc.) are also writable
 - A mount profile adds write access to one tool's config directories, picked automatically from the command being run or set with `--profile`
-- Your SSH configuration is replaced with an empty directory, and the ssh-agent socket is hidden
+- Your SSH configuration is replaced with a directory holding nothing but a locked-down `ssh_config`, and the ssh-agent socket is hidden
 - Network access is preserved
 
 ## Requirements
@@ -112,10 +112,26 @@ Both halves matter. Masking the key files alone would be theater: an ssh-agent s
 
 A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, the directory is writable so `ssh` can record a `known_hosts` entry instead of failing, and nothing written there survives the run.
 
-The practical consequence is that SSH authentication does not work inside the sandbox. `git push` over `ssh` fails; `https` remotes with a credential helper are unaffected. Two other things to expect:
+The directory is not left entirely bare: a small `~/.ssh/config` is seeded into it, and it is the only configuration `ssh` sees.
 
-- `known_hosts` starts empty, so the first connection to any host prompts for confirmation — which a non-interactive agent will hang on rather than answer.
-- Host aliases, `ProxyJump` and friends from your `~/.ssh/config` are gone, so connections by alias fail. `/etc/ssh/ssh_config` still applies.
+```
+Host *
+    BatchMode yes
+    IdentitiesOnly yes
+    ControlPath none
+```
+
+| Directive | Why |
+|---|---|
+| `BatchMode yes` | An empty `known_hosts` makes the first connection to any host ask for confirmation, and a non-interactive agent hangs on that prompt rather than answering it — the sandbox looks wedged instead of reporting that SSH is unavailable. This turns every prompt into an immediate failure. |
+| `IdentitiesOnly yes` | Offer only keys named by an `IdentityFile`. None is configured and the directory is empty, so nothing is offered — including keys held by an ssh-agent. This is what keeps the agent unreachable even if something inside the sandbox re-exports `SSH_AUTH_SOCK`, which unsetting the variable alone cannot prevent: the socket is still there under `/run`. |
+| `ControlPath none` | Refuse connection multiplexing, so a `ControlPath` from `/etc/ssh/ssh_config` pointing somewhere writable (`/tmp` is writable here) can't let the sandbox ride a connection authenticated outside it. |
+
+`~/.ssh/config` is read before `/etc/ssh/ssh_config` and the first value of a keyword wins, so nothing system-wide overrides these. The file arrives mode `0600` and is itself a mount point, so the sandbox can neither rewrite nor delete it — the settings hold for the whole run.
+
+The practical consequence is that SSH authentication does not work inside the sandbox, and thanks to `BatchMode` it fails immediately and says so instead of hanging on a prompt. `git push` over `ssh` fails; `https` remotes with a credential helper are unaffected. One more thing to expect:
+
+- Host aliases, `ProxyJump` and friends from your real `~/.ssh/config` are gone, so connections by alias fail. `/etc/ssh/ssh_config` still applies, except where the seeded config overrides it.
 
 Use `--ssh` for a run that needs your SSH identity. It exposes the real `~/.ssh` read-only, like the rest of the root, and leaves the agent socket reachable:
 
@@ -125,7 +141,12 @@ sbox --ssh --profile none git push
 
 `--rw` is applied after the mask, so `--rw ~/.ssh` also puts the real directory back and additionally makes it writable — for `ssh` to append to your real `known_hosts`, say. Note that it does *not* restore the agent socket; combine it with `--ssh` if you want both.
 
-One limitation: if `~/.ssh` is a symlink, the mask covers the directory it points at, so the sandbox still sees an empty `~/.ssh` — but the real directory remains readable under its own path.
+Two limitations:
+
+- If you have no `~/.ssh` at all, there is nothing to mask and no mount point to seed the config into — a read-only root can't be given one — so both are skipped.
+- If `~/.ssh` is a symlink, the mask covers the directory it points at, so the sandbox still sees an empty `~/.ssh` — but the real directory remains readable under its own path.
+
+`--dry-run` prints `--ro-bind-data 21 …`, referring to a file descriptor sbox opens just before it execs `bwrap`. That command isn't runnable as pasted without redirecting fd 21 yourself; `--dry-run` says so on stderr.
 
 ### Command arguments
 

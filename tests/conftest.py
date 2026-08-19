@@ -27,6 +27,12 @@ def sbox():
     return _load_sbox()
 
 
+@pytest.fixture(scope="session")
+def sbox_path():
+    """The script itself, for tests that run it rather than import it."""
+    return SBOX_PATH
+
+
 @pytest.fixture
 def run_sbox(tmp_path):
     """Run the real ``sbox --dry-run`` in a throwaway git workspace.

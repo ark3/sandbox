@@ -12,6 +12,10 @@ both halves of that split.
 Run with `uv run pytest`.
 """
 
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -237,6 +241,107 @@ def test_masking_creates_no_directories(run_sbox, tmp_path):
     r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
     assert r.returncode == 0
     assert not (home / ".ssh").exists()
+
+
+def test_ssh_config_is_seeded(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert f"--ro-bind-data 21 {home}/.ssh/config" in r.stdout
+
+
+def test_seeded_config_lands_after_the_tmpfs(run_sbox, tmp_path):
+    # The tmpfs is the config's mount point; emitted the other way round, the
+    # tmpfs would wipe it straight back out.
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    argv = _bwrap_args(r.stdout)
+    assert argv.index("--ro-bind-data") > argv.index("--tmpfs")
+
+
+def test_seeded_config_cannot_reach_the_real_ssh_dir(run_sbox, tmp_path):
+    # The safety property behind the whole ordering: --ro-bind-data writes at
+    # the path it is given, so if it were emitted after `--rw ~/.ssh` bound the
+    # real directory back, it would land in the user's actual ~/.ssh/config.
+    home = tmp_path / "home"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    r = run_sbox(
+        "--rw", str(ssh_dir), "--profile", "none", "bash",
+        extra_env={"HOME": str(home)},
+    )
+    argv = _bwrap_args(r.stdout)
+    rw_bind = [
+        i
+        for i in range(len(argv) - 2)
+        if argv[i : i + 3] == ["--bind", str(ssh_dir), str(ssh_dir)]
+    ]
+    assert rw_bind[0] > argv.index("--ro-bind-data")
+
+
+def test_no_config_seeded_without_a_dir_to_mask(run_sbox, tmp_path):
+    # No tmpfs means no mount point for the config, and an fd nobody opened.
+    home = tmp_path / "home"
+    home.mkdir()
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert "--ro-bind-data" not in r.stdout
+
+
+def test_ssh_flag_seeds_nothing(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--ssh", "--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert "--ro-bind-data" not in r.stdout
+
+
+def test_dry_run_explains_the_config_fd(run_sbox, tmp_path):
+    # The printed command references an inherited fd, so it is not runnable as
+    # pasted; say so rather than letting it fail cryptically.
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
+    assert "fd 21" in r.stderr
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="needs real bubblewrap")
+def test_seeded_config_is_readable_and_locked_down(sbox_path, tmp_path):
+    """Run real bwrap: the config must arrive intact, 0600, and immutable.
+
+    The rest of the suite reads the command sbox builds; this one checks what
+    that command actually does, since the properties the mask relies on --
+    permissions ssh will accept, and a file the sandbox cannot rewrite -- are
+    bubblewrap's behavior, not sbox's.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_ed25519").write_text("PRIVATE KEY")
+
+    probe = (
+        f"cat {home}/.ssh/config; "
+        f"stat -c 'perms=%a' {home}/.ssh/config; "
+        f"ls {home}/.ssh/id_ed25519 2>&1 | tail -1; "
+        f"(echo pwned > {home}/.ssh/config) 2>&1 | tail -1"
+    )
+    r = subprocess.run(
+        [sys.executable, str(sbox_path), "--profile", "none", "sh", "-c", probe],
+        cwd=workspace,
+        env={**os.environ, "HOME": str(home)},
+        capture_output=True,
+        text=True,
+    )
+    assert "BatchMode yes" in r.stdout
+    assert "IdentitiesOnly yes" in r.stdout
+    assert "ControlPath none" in r.stdout
+    assert "perms=600" in r.stdout          # ssh rejects a laxer config
+    assert "No such file" in r.stdout       # the real key is gone
+    assert "Read-only file system" in r.stdout  # and the config cannot be rewritten
+    assert (home / ".ssh" / "config").exists() is False  # nothing leaked to the host
 
 
 def test_explicit_rw_wins_over_ssh_mask(run_sbox, tmp_path):

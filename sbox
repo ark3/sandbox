@@ -71,6 +71,38 @@ REDIRECTS = {
 # still, and additionally makes the real directory writable.
 SSH_DIR = "~/.ssh"
 
+# Seeded into the masked ~/.ssh, where it is the only configuration ssh has.
+# ~/.ssh/config is read before /etc/ssh/ssh_config and the first value of a
+# keyword wins, so nothing system-wide can override these.
+#
+#   BatchMode      The load-bearing one. An empty known_hosts makes the first
+#                  connection to any host ask for confirmation, and a
+#                  non-interactive agent hangs on that prompt rather than
+#                  answering it -- the sandbox looks wedged instead of
+#                  reporting that ssh is unavailable. BatchMode turns every
+#                  prompt into an immediate failure.
+#   IdentitiesOnly Offer only keys named by an IdentityFile. None is
+#                  configured and the directory is empty, so nothing is
+#                  offered -- including keys held by an ssh-agent. This is
+#                  what keeps the agent unreachable even if something inside
+#                  the sandbox re-exports SSH_AUTH_SOCK, which unsetting the
+#                  variable alone cannot prevent: the socket is still there
+#                  under /run.
+#   ControlPath    Refuse connection multiplexing. Otherwise a ControlPath
+#                  from /etc/ssh/ssh_config pointing somewhere writable (/tmp
+#                  is writable here) could let the sandbox ride a connection
+#                  that was authenticated outside it.
+SSH_CONFIG = """\
+Host *
+    BatchMode yes
+    IdentitiesOnly yes
+    ControlPath none
+"""
+
+# bwrap reads the seeded config from an inherited file descriptor. A fixed
+# number keeps --dry-run output stable and quotable.
+SSH_CONFIG_FD = 21
+
 # Profiles: named sets of extra read-write mounts, selected by --profile or
 # auto-detected from the command name. A profile decides only what is writable
 # -- it does not decide what runs, and it does not decide which arguments get
@@ -256,6 +288,33 @@ def create_redirect_dirs():
         Path(os.path.expanduser(dest_spec)).mkdir(parents=True, exist_ok=True)
 
 
+def ssh_config_is_seeded(expose_ssh: bool) -> bool:
+    """Whether this run seeds a config into a masked ~/.ssh.
+
+    True only when the mask applies and there is a ~/.ssh to mask -- the same
+    condition build_bwrap_command uses to emit the --ro-bind-data that reads
+    SSH_CONFIG_FD. The descriptor setup and the --dry-run note both key off
+    this, so neither can drift from the command actually built.
+    """
+    return not expose_ssh and expand_and_validate_path(SSH_DIR) is not None
+
+
+def open_ssh_config_fd():
+    """Publish SSH_CONFIG on SSH_CONFIG_FD for bwrap's --ro-bind-data to read.
+
+    The descriptor has to survive execvp, so it is duplicated onto a fixed
+    number with the inheritable flag set. Writing before bwrap exists to read
+    cannot block: the config is far smaller than a pipe buffer.
+    """
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, SSH_CONFIG.encode())
+    os.close(write_fd)
+    os.dup2(read_fd, SSH_CONFIG_FD, inheritable=True)
+    if read_fd != SSH_CONFIG_FD:
+        os.close(read_fd)
+    os.set_inheritable(SSH_CONFIG_FD, True)
+
+
 def expand_and_validate_path(path_str: str) -> Path | None:
     """Expand ~ and env vars, return Path if exists, None otherwise."""
     expanded = os.path.expanduser(os.path.expandvars(path_str))
@@ -331,6 +390,16 @@ def build_bwrap_command(
         ssh_dir = expand_and_validate_path(SSH_DIR)
         if ssh_dir:
             cmd.extend(["--tmpfs", str(ssh_dir)])
+            # --ro-bind-data rather than --file: --file creates the config
+            # 0666 whatever the umask, and ssh refuses a group- or
+            # world-writable config outright. --perms 0600 would fix that but
+            # needs bwrap 0.5+ (Ubuntu 20.04 still ships 0.4). --ro-bind-data
+            # lands it 0600 on every version, and because the file is a mount
+            # point the sandbox can neither rewrite nor unlink it -- unlink
+            # returns EBUSY -- so the settings hold for the whole run.
+            cmd.extend(
+                ["--ro-bind-data", str(SSH_CONFIG_FD), str(ssh_dir / "config")]
+            )
         cmd.extend(["--unsetenv", "SSH_AUTH_SOCK"])
 
     # Ad-hoc read-write mounts
@@ -454,9 +523,20 @@ Examples:
 
     if args.dry_run:
         print(" ".join(bwrap_cmd))
+        if ssh_config_is_seeded(args.ssh):
+            print(
+                f"sbox: fd {SSH_CONFIG_FD} carries the seeded ~/.ssh/config; the"
+                f" printed command needs it redirected to run by hand",
+                file=sys.stderr,
+            )
         return 0
 
     create_redirect_dirs()
+
+    # Only when the command actually reads it -- an unopened fd 21 would make
+    # bwrap fail on a descriptor that isn't there.
+    if ssh_config_is_seeded(args.ssh):
+        open_ssh_config_fd()
 
     # Execute command - single line output
     if rel_path == Path("."):
