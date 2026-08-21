@@ -375,6 +375,17 @@ def test_resolve_profile_auto_from_command(sbox):
     assert sbox.resolve_profile(None, "codex") == "codex"
 
 
+def test_profile_matches_command_basename(run_sbox, tmp_path):
+    # An absolute path to the tool is still the tool, for the profile exactly
+    # as it already was for injection: both lookups key off the basename, so
+    # codex's mounts appear without --profile.
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    r = run_sbox("/usr/local/bin/codex", extra_env={"HOME": str(home)})
+    assert r.returncode == 0
+    assert f"--bind {home}/.codex {home}/.codex" in r.stdout
+
+
 def test_resolve_profile_unknown_exits(sbox):
     with pytest.raises(SystemExit):
         sbox.resolve_profile(None, "not-a-real-tool")

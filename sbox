@@ -245,32 +245,31 @@ def resolve_workspace(
     return workspace, rel_path
 
 
-def resolve_profile(explicit_profile: str | None, command: str) -> str:
-    """Resolve which mount profile to apply."""
+def resolve_profile(explicit_profile: str | None, command_name: str) -> str:
+    """Resolve which mount profile to apply, given the command's basename."""
     if explicit_profile:
         return explicit_profile
 
-    # Auto-detect from command name
-    if command in PROFILE_MOUNTS:
-        return command
+    if command_name in PROFILE_MOUNTS:
+        return command_name
 
     # Not recognized. The command itself is fine -- sbox just has no mount
     # profile for it, and won't guess which extra paths it should be able to
     # write.
-    print(f"Error: No mount profile for '{command}'", file=sys.stderr)
+    print(f"Error: No mount profile for '{command_name}'", file=sys.stderr)
     print("", file=sys.stderr)
     print(f"Available profiles: {', '.join(PROFILE_MOUNTS.keys())}", file=sys.stderr)
     print("", file=sys.stderr)
     print("Solutions:", file=sys.stderr)
     print(
-        f"  - Run with no extra mounts: sbox --profile none {command}",
+        f"  - Run with no extra mounts: sbox --profile none {command_name}",
         file=sys.stderr,
     )
     print(
-        f"  - Borrow another tool's mounts: sbox --profile codex {command}",
+        f"  - Borrow another tool's mounts: sbox --profile codex {command_name}",
         file=sys.stderr,
     )
-    print(f"  - Add '{command}' to PROFILE_MOUNTS in {__file__}", file=sys.stderr)
+    print(f"  - Add '{command_name}' to PROFILE_MOUNTS in {__file__}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -501,14 +500,17 @@ Examples:
     work_dir = Path.cwd()
     workspace, rel_path = resolve_workspace(args.workspace, work_dir)
 
-    # Mount profile
-    profile = resolve_profile(args.profile, command)
-
-    # Inject the command's default arguments before the user's own, so a
-    # user-supplied value of the same flag wins; log exactly what we add.
-    # Lookup is by command basename, so a wrapper command (a shell, make, env
-    # ...) run under a tool's profile never receives that tool's flags.
+    # A command is identified by its basename, derived once and used for both
+    # lookups below so the two cannot disagree about what is being run: an
+    # absolute path to a tool still resolves that tool's profile, and a wrapper
+    # command (a shell, make, env ...) run under a tool's profile still never
+    # receives that tool's flags.
     command_name = Path(command).name
+
+    profile = resolve_profile(args.profile, command_name)
+
+    # Injected before the user's own arguments, so a user-supplied value of the
+    # same flag wins; log exactly what we add.
     injected = COMMAND_ARGS.get(command_name, [])
     if injected:
         print(
