@@ -221,15 +221,12 @@ def resolve_profile(explicit_profile: str | None, command_name: str) -> str:
     print("", file=sys.stderr)
     print(f"Available profiles: {', '.join(PROFILE_MOUNTS.keys())}", file=sys.stderr)
     print("", file=sys.stderr)
+    # The suggestions name the flag rather than a whole command line: sbox
+    # matches on the basename, so echoing it back would hand you a command that
+    # runs something other than what you typed.
     print("Solutions:", file=sys.stderr)
-    print(
-        f"  - Run with no extra mounts: sbox --profile none {command_name}",
-        file=sys.stderr,
-    )
-    print(
-        f"  - Borrow another tool's mounts: sbox --profile codex {command_name}",
-        file=sys.stderr,
-    )
+    print("  - Run with no extra mounts: add --profile none", file=sys.stderr)
+    print("  - Borrow another tool's mounts: add --profile codex", file=sys.stderr)
     print(f"  - Add '{command_name}' to PROFILE_MOUNTS in {__file__}", file=sys.stderr)
     sys.exit(1)
 
