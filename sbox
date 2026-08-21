@@ -31,67 +31,37 @@ COMMON_RW_MOUNTS = [
     "~/.sonar/cache",
 ]
 
-# Redirects, DEST -> SRC: sandbox-private storage bind-mounted over the path a
-# tool expects, so the tool needs no configuration and the real directory stays
-# invisible and unmodified.
+# Redirects, DEST -> SRC. See "Sandbox-private state" in the README for what
+# these buy and what they cost.
 #
-# Prefer a tool's own configuration knob (see UV_TOOL_DIR in
-# build_bwrap_command) over a redirect: an env var announces itself to anyone
-# debugging inside the sandbox, while a redirect makes a path silently mean
-# something else. Reach for a redirect when the path is a hardcoded convention
-# with several consumers, or when the tool's knob is unreliable or unavailable.
+# Choosing the mechanism for the next tool: prefer the tool's own configuration
+# knob (see UV_TOOL_DIR in build_bwrap_command) over a redirect, because an env
+# var announces itself to anyone debugging inside the sandbox while a redirect
+# makes a path silently mean something else. Reach for a redirect when the path
+# is a hardcoded convention with several consumers, or when the tool's knob is
+# unreliable or unavailable. Maven qualifies on both counts: its only env knobs
+# are MAVEN_OPTS (JVM flags -- clobbers heap settings) and MAVEN_ARGS (Maven
+# 3.9+ only).
 #
-# Maven qualifies on both counts. `mvn install` writes the built artifact into
-# ~/.m2/repository, which is outside the workspace and therefore read-only, so
-# installs fail outright; and that path is baked into mvn, mvnw, Gradle's
-# mavenLocal() and IDEs alike. Its only env knobs are MAVEN_OPTS (JVM flags --
-# clobbers heap settings) and MAVEN_ARGS (Maven 3.9+ only).
-#
-# Only ~/.m2/repository is redirected, so ~/.m2/settings.xml stays readable and
-# internal mirrors and credentials keep working.
+# Redirect the narrowest path that works: ~/.m2/settings.xml must stay readable
+# or internal mirrors and credentials break.
 REDIRECTS = {
     "~/.m2/repository": "~/.cache/agent-m2",
 }
 
-# The SSH directory is replaced with an empty tmpfs, and SSH_AUTH_SOCK is
-# unset alongside it. Unlike a redirect, which hands a tool private storage so
-# it keeps working, this takes capability away: the sandbox cannot read your
-# private keys, and it cannot borrow your identity from a running ssh-agent
-# either. Masking the files alone would not achieve the second -- an agent
-# socket survives --unshare-all, so `git push` would keep authenticating with
-# keys the sandbox can no longer see, and the masking would be theater.
+# Replaced with an empty tmpfs, with SSH_AUTH_SOCK unset alongside it. The
+# threat model, the cost, and how to opt out are in the README's SSH section.
 #
-# A tmpfs rather than a bind of some empty directory: nothing is created on the
-# host, so --dry-run stays free of side effects; the directory is writable, so
-# ssh records a known_hosts entry instead of failing; and nothing left there
-# survives the run.
-#
-# --ssh opts out, exposing the real ~/.ssh (read-only, like the rest of the
-# root) and leaving the agent socket reachable. --rw ~/.ssh is applied later
-# still, and additionally makes the real directory writable.
+# A tmpfs rather than a bind of some empty directory, for three reasons that
+# constrain any replacement: nothing is created on the host, so --dry-run stays
+# free of side effects; the directory is writable, so ssh records a known_hosts
+# entry instead of failing; and nothing left there survives the run.
 SSH_DIR = "~/.ssh"
 
-# Seeded into the masked ~/.ssh, where it is the only configuration ssh has.
+# Seeded into the masked ~/.ssh, where it is the only configuration ssh has --
 # ~/.ssh/config is read before /etc/ssh/ssh_config and the first value of a
-# keyword wins, so nothing system-wide can override these.
-#
-#   BatchMode      The load-bearing one. An empty known_hosts makes the first
-#                  connection to any host ask for confirmation, and a
-#                  non-interactive agent hangs on that prompt rather than
-#                  answering it -- the sandbox looks wedged instead of
-#                  reporting that ssh is unavailable. BatchMode turns every
-#                  prompt into an immediate failure.
-#   IdentitiesOnly Offer only keys named by an IdentityFile. None is
-#                  configured and the directory is empty, so nothing is
-#                  offered -- including keys held by an ssh-agent. This is
-#                  what keeps the agent unreachable even if something inside
-#                  the sandbox re-exports SSH_AUTH_SOCK, which unsetting the
-#                  variable alone cannot prevent: the socket is still there
-#                  under /run.
-#   ControlPath    Refuse connection multiplexing. Otherwise a ControlPath
-#                  from /etc/ssh/ssh_config pointing somewhere writable (/tmp
-#                  is writable here) could let the sandbox ride a connection
-#                  that was authenticated outside it.
+# keyword wins. All three directives are load-bearing; the README's SSH section
+# says what each one defends against, so don't drop one without reading it.
 SSH_CONFIG = """\
 Host *
     BatchMode yes
@@ -103,10 +73,9 @@ Host *
 # number keeps --dry-run output stable and quotable.
 SSH_CONFIG_FD = 21
 
-# Profiles: named sets of extra read-write mounts, selected by --profile or
-# auto-detected from the command name. A profile decides only what is writable
-# -- it does not decide what runs, and it does not decide which arguments get
-# injected (see COMMAND_ARGS below).
+# Named sets of extra read-write mounts, selected by --profile or auto-detected
+# from the command's basename. A profile decides only what is writable -- not
+# what runs, and not which arguments get injected (see COMMAND_ARGS below).
 PROFILE_MOUNTS = {
     "claude": [
         "~/.claude",
@@ -136,16 +105,10 @@ PROFILE_MOUNTS = {
 PROFILE_MOUNTS["claude-agent-acp"] = list(PROFILE_MOUNTS["claude"])
 
 # Default arguments injected before the user's own, keyed by COMMAND NAME (not
-# by --profile). sbox already provides the sandbox, so tell the inner tool not
-# to run its own. These are single-valued flags, so a user-supplied value of
-# the same flag overrides the default (last occurrence wins in both CLIs).
+# by --profile) -- see the README's "Command arguments" section.
 #
-# Keying on the command is what makes `sbox --profile codex bash` work: you get
-# codex's mounts for a shell you launch codex from yourself, without bash being
-# handed --sandbox danger-full-access, which it would reject.
-#
-# Note: claude-agent-acp is intentionally absent even though it shares claude's
-# mounts -- the ACP adapter does not accept --permission-mode, so injecting it
+# claude-agent-acp is intentionally absent even though it shares claude's
+# mounts: the ACP adapter does not accept --permission-mode, so injecting it
 # would break the command.
 COMMAND_ARGS = {
     "claude": ["--permission-mode", "bypassPermissions"],
@@ -154,7 +117,6 @@ COMMAND_ARGS = {
 
 
 def check_bubblewrap():
-    """Verify bubblewrap is installed."""
     if not shutil.which("bwrap"):
         print("Error: bubblewrap (bwrap) is not installed", file=sys.stderr)
         print("", file=sys.stderr)
@@ -166,7 +128,6 @@ def check_bubblewrap():
 
 
 def find_workspace_via_markers(start_path: Path) -> Path | None:
-    """Walk up directory tree looking for marker files."""
     current = start_path.resolve()
 
     while True:
@@ -245,32 +206,28 @@ def resolve_workspace(
     return workspace, rel_path
 
 
-def resolve_profile(explicit_profile: str | None, command: str) -> str:
-    """Resolve which mount profile to apply."""
+def resolve_profile(explicit_profile: str | None, command_name: str) -> str:
+    """Resolve which mount profile to apply, given the command's basename."""
     if explicit_profile:
         return explicit_profile
 
-    # Auto-detect from command name
-    if command in PROFILE_MOUNTS:
-        return command
+    if command_name in PROFILE_MOUNTS:
+        return command_name
 
     # Not recognized. The command itself is fine -- sbox just has no mount
     # profile for it, and won't guess which extra paths it should be able to
     # write.
-    print(f"Error: No mount profile for '{command}'", file=sys.stderr)
+    print(f"Error: No mount profile for '{command_name}'", file=sys.stderr)
     print("", file=sys.stderr)
     print(f"Available profiles: {', '.join(PROFILE_MOUNTS.keys())}", file=sys.stderr)
     print("", file=sys.stderr)
+    # The suggestions name the flag rather than a whole command line: sbox
+    # matches on the basename, so echoing it back would hand you a command that
+    # runs something other than what you typed.
     print("Solutions:", file=sys.stderr)
-    print(
-        f"  - Run with no extra mounts: sbox --profile none {command}",
-        file=sys.stderr,
-    )
-    print(
-        f"  - Borrow another tool's mounts: sbox --profile codex {command}",
-        file=sys.stderr,
-    )
-    print(f"  - Add '{command}' to PROFILE_MOUNTS in {__file__}", file=sys.stderr)
+    print("  - Run with no extra mounts: add --profile none", file=sys.stderr)
+    print("  - Borrow another tool's mounts: add --profile codex", file=sys.stderr)
+    print(f"  - Add '{command_name}' to PROFILE_MOUNTS in {__file__}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -331,21 +288,16 @@ def build_bwrap_command(
     command: str,
     args: list[str],
 ) -> list[str]:
-    """Build the bubblewrap command line."""
     cmd = ["bwrap"]
 
-    # Environment variables
+    # Base sandbox: environment, read-only root, and the writable workspace.
+    # UV_TOOL_DIR is sandbox-private storage via the tool's own knob rather than
+    # a redirect -- see REDIRECTS for when to use which.
     cmd.extend(["--setenv", "SBOX", "1"])
     cmd.extend(["--setenv", "UV_TOOL_DIR", os.path.expanduser("~/.cache/agent-uv-tools")])
-
-    # Read-only root filesystem
     cmd.extend(["--ro-bind", "/", "/"])
-
-    # Standard device/proc mounts
     cmd.extend(["--dev", "/dev"])
     cmd.extend(["--proc", "/proc"])
-
-    # Workspace as read-write
     cmd.extend(["--bind", str(workspace), str(workspace)])
 
     # Profile mounts
@@ -411,15 +363,11 @@ def build_bwrap_command(
             print(f"Error: --rw path not found: {rw_path}", file=sys.stderr)
             sys.exit(1)
 
-    # Isolation and network
+    # Isolation, then where and what to run.
     cmd.extend(["--unshare-all"])
     cmd.extend(["--share-net"])
     cmd.extend(["--die-with-parent"])
-
-    # Working directory
     cmd.extend(["--chdir", str(work_dir)])
-
-    # The command to run
     cmd.append(command)
     cmd.extend(args)
 
@@ -497,18 +445,20 @@ Examples:
 
     check_bubblewrap()
 
-    # Workspace detection
     work_dir = Path.cwd()
     workspace, rel_path = resolve_workspace(args.workspace, work_dir)
 
-    # Mount profile
-    profile = resolve_profile(args.profile, command)
-
-    # Inject the command's default arguments before the user's own, so a
-    # user-supplied value of the same flag wins; log exactly what we add.
-    # Lookup is by command basename, so a wrapper command (a shell, make, env
-    # ...) run under a tool's profile never receives that tool's flags.
+    # A command is identified by its basename, derived once and used for both
+    # lookups below so the two cannot disagree about what is being run: an
+    # absolute path to a tool still resolves that tool's profile, and a wrapper
+    # command (a shell, make, env ...) run under a tool's profile still never
+    # receives that tool's flags.
     command_name = Path(command).name
+
+    profile = resolve_profile(args.profile, command_name)
+
+    # Injected before the user's own arguments, so a user-supplied value of the
+    # same flag wins; log exactly what we add.
     injected = COMMAND_ARGS.get(command_name, [])
     if injected:
         print(
@@ -516,7 +466,6 @@ Examples:
         )
     command_args = injected + command_args
 
-    # Build command
     bwrap_cmd = build_bwrap_command(
         workspace, profile, args.rw, args.ssh, work_dir, command, command_args
     )
@@ -533,17 +482,14 @@ Examples:
 
     create_redirect_dirs()
 
-    # Only when the command actually reads it -- an unopened fd 21 would make
-    # bwrap fail on a descriptor that isn't there.
+    # Only when the command actually reads it -- an unopened SSH_CONFIG_FD would
+    # make bwrap fail on a descriptor that isn't there.
     if ssh_config_is_seeded(args.ssh):
         open_ssh_config_fd()
 
-    # Execute command - single line output
     if rel_path == Path("."):
-        # cwd is workspace root
         print(f"sbox [{profile}]: {workspace}", file=sys.stderr)
     else:
-        # cwd is subdirectory
         print(f"sbox [{profile}]: {workspace} ({rel_path})", file=sys.stderr)
 
     try:

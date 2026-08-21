@@ -6,10 +6,13 @@ A lightweight sandbox wrapper using [bubblewrap](https://github.com/containers/b
 
 - The entire filesystem is mounted read-only
 - Your workspace directory is mounted read-write
-- A set of common cache directories (npm, gradle, ~/.cache, etc.) are also writable
+- A set of shared caches and agent state directories (`~/.cache`, npm, gradle, `~/.agents`, …) are also writable — see `COMMON_RW_MOUNTS`
 - A mount profile adds write access to one tool's config directories, picked automatically from the command being run or set with `--profile`
+- Tools that insist on writing outside the workspace get sandbox-private storage instead of your real state
 - Your SSH configuration is replaced with a directory holding nothing but a locked-down `ssh_config`, and the ssh-agent socket is hidden
 - Network access is preserved
+
+This README explains *what* sbox does and *why*. The authoritative *how* — which paths, which profiles, which arguments — lives in `sbox` itself, and is named here rather than copied, so the two can't drift apart. The lists below are illustrative.
 
 ## Requirements
 
@@ -52,53 +55,58 @@ An explicit `--` still works as a hard separator if a command name would otherwi
 | `--workspace PATH` | Explicitly set the workspace root |
 | `--profile NAME` | Select the mount profile (see below) |
 | `--rw PATH` | Add an extra read-write mount (repeatable) |
-| `--ssh` | Expose the real `~/.ssh` and ssh-agent (default: an empty directory) |
+| `--ssh` / `--no-ssh` | Expose the real `~/.ssh` and ssh-agent (default: `--no-ssh`, an empty directory) |
 | `--dry-run` | Print the `bwrap` command without running it |
 
 ### Workspace detection
 
 The workspace root is detected automatically (unless `--workspace` is given):
 
-1. Walk up from the current directory looking for a marker file: `.sandbox-workspace`, `.sandbox-root`, `.sandboxrc`, `.workspace-root`, or `WORKSPACE`
-2. Fall back to the outermost git repository root
+1. Walk up from the current directory looking for a marker file, such as `.sandbox-workspace` — see `MARKER_FILES` for the set
+2. Fall back to the outermost git repository root — the outermost, so a submodule or a nested checkout doesn't shrink the workspace to a subdirectory of the project you're working on
 
 The current directory must be inside the workspace.
 
 ### Mount profiles
 
-A *profile* is a named set of extra read-write mounts. It controls only what is writable — it does not decide what runs, and it does not decide which arguments get injected. Select one with `--profile`, or let it be auto-detected from the command name:
+A *profile* is a named set of extra read-write mounts. It controls only what is writable — it does not decide what runs, and it does not decide which arguments get injected. Select one with `--profile`, or let it be auto-detected from the command's name:
 
-| Profile | Extra writable paths |
-|---|---|
-| `claude` | `~/.claude`, `~/.claude.json` |
-| `codex` | `~/.codex` |
-| `opencode` | `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` |
-| `none` | _(none)_ |
+```sh
+sbox claude                 # the `claude` profile: ~/.claude and friends are writable
+sbox --profile none bash    # no extra mounts
+```
 
-If the command name matches a profile, that profile is selected automatically. Otherwise sbox stops and asks rather than guessing: an unrecognized command is an error, and you say `--profile none` to confirm it needs no extra writable paths. This is deliberate — silently running with no profile would let a tool fail deep inside the sandbox on a config directory it couldn't write, which is a far worse error message than the one you get up front.
+`PROFILE_MOUNTS` is the list of profiles and what each one makes writable; `--profile` accepts exactly those names, and `--help` prints them.
+
+A command is identified by its basename, so `sbox /usr/local/bin/codex` gets the same profile as `sbox codex`.
+
+If the command's name matches a profile, that profile is selected automatically. Otherwise sbox stops and asks rather than guessing: an unrecognized command is an error, and you say `--profile none` to confirm it needs no extra writable paths. This is deliberate — silently running with no profile would let a tool fail deep inside the sandbox on a config directory it couldn't write, which is a far worse error message than the one you get up front.
 
 Exactly one profile applies per run; they don't compose.
 
-### Redirects
+### Sandbox-private state
 
-Some tools write to a fixed path outside the workspace. Rather than making that path writable — which would let a sandboxed agent modify state your normal, unsandboxed work depends on — sbox bind-mounts a sandbox-private directory *over* it:
+Some tools must write to a fixed path outside the workspace, and simply failing isn't an option — `mvn install`'s entire job is to write into `~/.m2/repository`, and `uv tool install` into `~/.local/share/uv/tools`. Making those paths writable would defeat the point, letting a sandboxed agent modify state your normal, unsandboxed work depends on. So sbox gives each tool private storage under `~/.cache` and lets it write there instead.
 
-| Path inside the sandbox | Actually |
-|---|---|
-| `~/.m2/repository` | `~/.cache/agent-m2` |
+Two mechanisms, chosen per tool:
 
-Maven's local repository is the motivating case: `mvn install`'s whole job is writing the built artifact into `~/.m2/repository`, which is read-only here, so installs fail outright. With the redirect, Maven writes to a repository of its own and your real one is neither visible nor modifiable from inside.
+| Tool | Path it wants | Mechanism |
+|---|---|---|
+| Maven | `~/.m2/repository` | a bind mount over the path — see `REDIRECTS` |
+| uv | `~/.local/share/uv/tools` | `UV_TOOL_DIR`, set in `build_bwrap_command` |
 
-No configuration is needed — `mvn`, `mvnw`, Gradle's `mavenLocal()` and IDEs all find the repository at the path they already expect, on any Maven version. Only the `repository` subtree is replaced, so `~/.m2/settings.xml` stays readable and internal mirrors and credentials keep working.
+The environment variable is preferred where a tool offers one, because it announces itself to anyone debugging inside the sandbox; a bind mount silently makes a path mean something else. Maven gets the bind mount because its path is a hardcoded convention with several consumers — `mvn`, `mvnw`, Gradle's `mavenLocal()`, IDEs — and its only environment knobs are unusable or version-dependent. `sbox` documents that tradeoff where the redirects are defined, for whoever adds the next one.
 
-Two consequences:
+Either way, no configuration is needed inside the sandbox, and the redirect is surgical: only `~/.m2/repository` is replaced, so `~/.m2/settings.xml` stays readable and your internal mirrors and credentials keep working.
 
-- The sandbox repository starts empty and fills up as you build. It persists across runs, so the cost is a slow first build, not a slow every build — but dependencies fetched outside the sandbox don't warm it, and vice versa.
-- Artifacts an agent installs are invisible to your unsandboxed builds. A library `mvn install`ed inside the sandbox won't be found by an `mvn` run outside it.
+The consequences are the same for both, and worth knowing:
 
-sbox creates both ends of a redirect on the host if they don't exist — the only case where it writes outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first.
+- Private storage starts empty and fills up as you work. It persists across runs, so the cost is a slow first build, not a slow every build — but downloads outside the sandbox don't warm it, and vice versa.
+- Anything an agent installs is invisible outside. A library `mvn install`ed inside the sandbox won't be found by an `mvn` run outside it.
 
-If you genuinely want the real repository inside the sandbox, `--rw` is applied after redirects and wins:
+sbox creates both ends of a bind redirect on the host if they don't exist — the only case where it writes outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first.
+
+If you genuinely want the real path inside the sandbox, `--rw` is applied after redirects and wins:
 
 ```sh
 sbox --rw ~/.m2/repository claude    # writes land in the real local repository
@@ -112,14 +120,7 @@ Both halves matter. Masking the key files alone would be theater: an ssh-agent s
 
 A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, the directory is writable so `ssh` can record a `known_hosts` entry instead of failing, and nothing written there survives the run.
 
-The directory is not left entirely bare: a small `~/.ssh/config` is seeded into it, and it is the only configuration `ssh` sees.
-
-```
-Host *
-    BatchMode yes
-    IdentitiesOnly yes
-    ControlPath none
-```
+The directory is not left entirely bare: a small `~/.ssh/config` is seeded into it — `SSH_CONFIG` in `sbox` — and it is the only configuration `ssh` sees. It sets three directives, each load-bearing:
 
 | Directive | Why |
 |---|---|
@@ -146,16 +147,11 @@ Two limitations:
 - If you have no `~/.ssh` at all, there is nothing to mask and no mount point to seed the config into — a read-only root can't be given one — so both are skipped.
 - If `~/.ssh` is a symlink, the mask covers the directory it points at, so the sandbox still sees an empty `~/.ssh` — but the real directory remains readable under its own path.
 
-`--dry-run` prints `--ro-bind-data 21 …`, referring to a file descriptor sbox opens just before it execs `bwrap`. That command isn't runnable as pasted without redirecting fd 21 yourself; `--dry-run` says so on stderr.
+`--dry-run` prints a `--ro-bind-data` referring to a file descriptor (`SSH_CONFIG_FD`) that sbox opens just before it execs `bwrap`. That command isn't runnable as pasted without redirecting the descriptor yourself; `--dry-run` says which one on stderr.
 
 ### Command arguments
 
-Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized commands it injects a default argument ahead of your own:
-
-| Command | Injected argument |
-|---|---|
-| `claude` | `--permission-mode bypassPermissions` |
-| `codex` | `--sandbox danger-full-access` |
+Because sbox already provides the sandbox, it tells the inner tool not to run its own. For recognized commands it injects a default argument ahead of your own — `claude` gets `--permission-mode bypassPermissions`, for instance. `COMMAND_ARGS` is the full mapping.
 
 Injection is keyed on the **command you run**, not on `--profile`. That means you can borrow a tool's mounts for something else without the tool's flags coming along:
 
@@ -164,6 +160,8 @@ sbox --profile codex bash   # ~/.codex is writable; bash gets no --sandbox flag
 ```
 
 Inside that shell you can export whatever you like and launch `codex` yourself, with full control over its arguments.
+
+The two are independent in the other direction too: having a profile doesn't imply an injection. `claude-agent-acp` shares `claude`'s mounts, but the ACP adapter rejects `--permission-mode`, so it gets nothing injected.
 
 These are single-valued flags, so passing the same flag yourself overrides the default (the last occurrence wins):
 
@@ -197,7 +195,7 @@ sbox --profile codex bash
 sbox claude --resume UUID
 ```
 
-The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment.
+The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment. `UV_TOOL_DIR` is also set, for the reasons in [Sandbox-private state](#sandbox-private-state).
 
 ## Development
 
