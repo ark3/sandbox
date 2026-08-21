@@ -6,7 +6,7 @@ A lightweight sandbox wrapper using [bubblewrap](https://github.com/containers/b
 
 - The entire filesystem is mounted read-only
 - Your workspace directory is mounted read-write
-- A set of common cache directories (npm, gradle, `~/.cache`, …) are also writable
+- A set of shared caches and agent state directories (`~/.cache`, npm, gradle, `~/.agents`, …) are also writable — see `COMMON_RW_MOUNTS`
 - A mount profile adds write access to one tool's config directories, picked automatically from the command being run or set with `--profile`
 - Tools that insist on writing outside the workspace get sandbox-private storage instead of your real state
 - Your SSH configuration is replaced with a directory holding nothing but a locked-down `ssh_config`, and the ssh-agent socket is hidden
