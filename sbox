@@ -104,6 +104,12 @@ PROFILE_MOUNTS = {
 # the other entry.
 PROFILE_MOUNTS["claude-agent-acp"] = list(PROFILE_MOUNTS["claude"])
 
+# The union of every profile defined above. dict.fromkeys preserves profile and
+# path order while collapsing overlaps such as claude-agent-acp's shared state.
+PROFILE_MOUNTS["all"] = list(
+    dict.fromkeys(path for mounts in PROFILE_MOUNTS.values() for path in mounts)
+)
+
 # Default arguments injected before the user's own, keyed by COMMAND NAME (not
 # by --profile) -- see the README's "Command arguments" section.
 #

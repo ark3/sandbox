@@ -73,6 +73,7 @@ A *profile* is a named set of extra read-write mounts. It controls only what is 
 
 ```sh
 sbox claude                 # the `claude` profile: ~/.claude and friends are writable
+sbox all                    # all profile-specific paths are writable
 sbox --profile none bash    # no extra mounts
 ```
 
@@ -83,6 +84,11 @@ A command is identified by its basename, so `sbox /usr/local/bin/codex` gets the
 If the command's name matches a profile, that profile is selected automatically. Otherwise sbox stops and asks rather than guessing: an unrecognized command is an error, and you say `--profile none` to confirm it needs no extra writable paths. This is deliberate — silently running with no profile would let a tool fail deep inside the sandbox on a config directory it couldn't write, which is a far worse error message than the one you get up front.
 
 Exactly one profile applies per run; they don't compose.
+
+The `all` profile is the deduplicated union of every other profile. It is useful
+for a launcher that can start multiple tools. Argument injection still follows
+only the top-level command, so a launcher must supply any tool-specific
+permission or sandbox arguments itself.
 
 ### Sandbox-private state
 
