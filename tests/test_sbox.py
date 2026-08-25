@@ -386,6 +386,36 @@ def test_profile_matches_command_basename(run_sbox, tmp_path):
     assert f"--bind {home}/.codex {home}/.codex" in r.stdout
 
 
+def test_all_auto_profile_mounts_every_supported_agent_state(run_sbox, tmp_path):
+    home = tmp_path / "home"
+    agent_state_paths = [
+        ".claude",
+        ".claude.json",
+        ".codex",
+        ".config/opencode",
+        ".local/share/opencode",
+        ".local/state/opencode",
+        ".pi/agent",
+        ".omp",
+        ".eclipse",
+    ]
+    for relative_path in agent_state_paths:
+        path = home / relative_path
+        if path.suffix == ".json":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+
+    r = run_sbox("all", extra_env={"HOME": str(home)})
+
+    assert r.returncode == 0
+    assert "adding" not in r.stderr
+    for relative_path in agent_state_paths:
+        path = home / relative_path
+        assert r.stdout.count(f"--bind {path} {path}") == 1
+
+
 def test_resolve_profile_unknown_exits(sbox):
     with pytest.raises(SystemExit):
         sbox.resolve_profile(None, "not-a-real-tool")
