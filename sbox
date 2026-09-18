@@ -90,7 +90,7 @@ PROFILE_MOUNTS = {
         "~/.local/state/opencode",
     ],
     "pi": [
-        "~/.pi/agent",
+        "~/.pi",
     ],
     "omp": [
         "~/.omp",

@@ -409,7 +409,7 @@ def test_all_auto_profile_mounts_every_supported_agent_state(run_sbox, tmp_path)
         ".config/opencode",
         ".local/share/opencode",
         ".local/state/opencode",
-        ".pi/agent",
+        ".pi",
         ".omp",
         ".eclipse",
     ]
