@@ -99,13 +99,20 @@ PROFILE_MOUNTS = {
     "none": [],
 }
 
-# Copy, don't alias: the acp variant shares claude's mounts today, but keeping
+# ACP adapters run their agent as a child inside the same sandbox, so each needs
+# its agent's mounts. The names are irregular -- claude-agent-acp against
+# codex-acp and pi-acp -- so matching is by literal entry, not by stripping a
+# suffix.
+#
+# Copy, don't alias: each variant shares its agent's mounts today, but keeping
 # a distinct list means a future per-variant mount edit can't silently mutate
-# the other entry.
+# another entry.
 PROFILE_MOUNTS["claude-agent-acp"] = list(PROFILE_MOUNTS["claude"])
+PROFILE_MOUNTS["codex-acp"] = list(PROFILE_MOUNTS["codex"])
+PROFILE_MOUNTS["pi-acp"] = list(PROFILE_MOUNTS["pi"])
 
 # The union of every profile defined above. dict.fromkeys preserves profile and
-# path order while collapsing overlaps such as claude-agent-acp's shared state.
+# path order while collapsing overlaps such as the ACP variants' shared state.
 PROFILE_MOUNTS["all"] = list(
     dict.fromkeys(path for mounts in PROFILE_MOUNTS.values() for path in mounts)
 )
@@ -113,9 +120,9 @@ PROFILE_MOUNTS["all"] = list(
 # Default arguments injected before the user's own, keyed by COMMAND NAME (not
 # by --profile) -- see the README's "Command arguments" section.
 #
-# claude-agent-acp is intentionally absent even though it shares claude's
-# mounts: the ACP adapter does not accept --permission-mode, so injecting it
-# would break the command.
+# The -acp variants are intentionally absent even though they share their
+# agent's mounts: an ACP adapter does not accept the agent's flags, so
+# injecting them would break the command.
 COMMAND_ARGS = {
     "claude": ["--permission-mode", "bypassPermissions"],
     "codex": ["--sandbox", "danger-full-access"],
