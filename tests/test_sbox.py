@@ -109,12 +109,14 @@ def test_injection_matches_command_basename(run_sbox):
     )
 
 
-def test_acp_variant_gets_no_injection(run_sbox):
-    # claude-agent-acp shares claude's mounts but the ACP adapter rejects
-    # --permission-mode, so nothing is injected.
-    r = run_sbox("claude-agent-acp")
+@pytest.mark.parametrize("variant", ["claude-agent-acp", "codex-acp", "pi-acp"])
+def test_acp_variant_gets_no_injection(run_sbox, variant):
+    # An -acp variant shares its agent's mounts but the adapter rejects the
+    # agent's flags, so nothing is injected.
+    r = run_sbox(variant)
     assert r.returncode == 0
     assert "--permission-mode" not in r.stdout
+    assert "--sandbox" not in r.stdout
     assert "adding" not in r.stderr
 
 
@@ -373,6 +375,18 @@ def test_resolve_profile_explicit_wins(sbox):
 
 def test_resolve_profile_auto_from_command(sbox):
     assert sbox.resolve_profile(None, "codex") == "codex"
+
+
+@pytest.mark.parametrize(
+    "variant,agent",
+    [("claude-agent-acp", "claude"), ("codex-acp", "codex"), ("pi-acp", "pi")],
+)
+def test_acp_variant_mirrors_its_agent_mounts(sbox, variant, agent):
+    # Each adapter runs its agent as a child of the same sandbox, so it needs
+    # the same writable paths. The names are irregular, so each is a literal
+    # entry: a missing one is an exact-match miss, not a fallback to the agent.
+    assert sbox.resolve_profile(None, variant) == variant
+    assert sbox.PROFILE_MOUNTS[variant] == sbox.PROFILE_MOUNTS[agent]
 
 
 def test_profile_matches_command_basename(run_sbox, tmp_path):
