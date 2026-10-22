@@ -16,8 +16,7 @@ This README explains *what* sbox does and *why*. The authoritative *how* — whi
 
 ## Requirements
 
-- Linux
-- [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
+- Linux with [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`), or macOS with `/usr/bin/sandbox-exec`
 - Python 3.10+
 
 ```
@@ -25,6 +24,16 @@ sudo apt install bubblewrap   # Debian/Ubuntu
 sudo dnf install bubblewrap   # Fedora
 sudo pacman -S bubblewrap     # Arch
 ```
+
+## macOS (experimental)
+
+On macOS, sbox uses Seatbelt through `/usr/bin/sandbox-exec` rather than bubblewrap. The policy is allow-by-default but denies writes, then re-allows the workspace and the paths named by `PROFILE_MOUNTS` and `COMMON_RW_MOUNTS`, plus the real `$TMPDIR`, character devices, and explicit `--rw` paths.
+
+Seatbelt has no bind mounts or namespaces. `REDIRECTS` therefore has no macOS equivalent: `~/.m2/repository` remains read-only and `mvn install` fails loudly instead of receiving sandbox-private Maven storage. `UV_TOOL_DIR` is still set as it is on Linux.
+
+With the default `--no-ssh`, Seatbelt denies reads below `~/.ssh` and unsets `SSH_AUTH_SOCK`. It also blocks connections to the agent socket itself: the one `SSH_AUTH_SOCK` names, and launchd's agent socket by pattern even when the variable is unset. Seatbelt can hide `~/.ssh/config` but cannot put the seeded `SSH_CONFIG` in its place, so sbox hands those directives to git as `ssh` options in `GIT_SSH_COMMAND`, with `/dev/null` standing in for every config and `known_hosts` file; nothing is written on the host. This reaches plain `ssh` only partly: without a terminal attached, as when an agent runs it, an unknown host fails immediately; an interactive shell inside sbox may instead ask whether to trust that host. `--ssh` opts out, and `--rw ~/.ssh` deliberately restores reads as well as writes.
+
+As escape-hatch friction, the policy denies `appleevent-send` and `mach-lookup` for global name `com.apple.coreservices.launchservicesd`: `launchctl submit` and `launchctl bootstrap gui/<uid>` can run commands outside the sandbox when invoked unsandboxed, but both fail under the full policy. Those denies are not a containment guarantee.
 
 ## Installation
 
@@ -56,7 +65,7 @@ An explicit `--` still works as a hard separator if a command name would otherwi
 | `--profile NAME` | Select the mount profile (see below) |
 | `--rw PATH` | Add an extra read-write mount (repeatable) |
 | `--ssh` / `--no-ssh` | Expose the real `~/.ssh` and ssh-agent (default: `--no-ssh`, an empty directory) |
-| `--dry-run` | Print the `bwrap` command without running it |
+| `--dry-run` | Print the backend command and policy without running it |
 
 ### Workspace detection
 
@@ -92,6 +101,8 @@ permission or sandbox arguments itself.
 
 ### Sandbox-private state
 
+This section describes the Linux backend; macOS has no bind-mount redirects, as described in [macOS (experimental)](#macos-experimental).
+
 Some tools must write to a fixed path outside the workspace, and simply failing isn't an option — `mvn install`'s entire job is to write into `~/.m2/repository`, and `uv tool install` into `~/.local/share/uv/tools`. Making those paths writable would defeat the point, letting a sandboxed agent modify state your normal, unsandboxed work depends on. So sbox gives each tool private storage under `~/.cache` and lets it write there instead.
 
 Two mechanisms, chosen per tool:
@@ -120,11 +131,13 @@ sbox --rw ~/.m2/repository claude    # writes land in the real local repository
 
 ### SSH
 
+The implementation details below describe Linux's tmpfs-based mask; the macOS behavior and its interactive limitation are in [macOS (experimental)](#macos-experimental).
+
 The rest of the filesystem is read-only, not invisible — a sandboxed tool can still *read* everything, including your private keys. So `~/.ssh` gets separate treatment: it is replaced with an empty `tmpfs`, and `SSH_AUTH_SOCK` is unset.
 
 Both halves matter. Masking the key files alone would be theater: an ssh-agent socket survives `--unshare-all`, and keys loaded into the agent stay usable through it whether or not the sandbox can see the files they came from.
 
-A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, the directory is writable so `ssh` can record a `known_hosts` entry instead of failing, and nothing written there survives the run.
+A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, and nothing written there survives the run.
 
 The directory is not left entirely bare: a small `~/.ssh/config` is seeded into it — `SSH_CONFIG` in `sbox` — and it is the only configuration `ssh` sees. It sets three directives, each load-bearing:
 

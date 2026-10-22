@@ -3,8 +3,10 @@
 
 import argparse
 import os
+import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 # Configuration
@@ -52,16 +54,17 @@ REDIRECTS = {
 # Replaced with an empty tmpfs, with SSH_AUTH_SOCK unset alongside it. The
 # threat model, the cost, and how to opt out are in the README's SSH section.
 #
-# A tmpfs rather than a bind of some empty directory, for three reasons that
+# A tmpfs rather than a bind of some empty directory, for two reasons that
 # constrain any replacement: nothing is created on the host, so --dry-run stays
-# free of side effects; the directory is writable, so ssh records a known_hosts
-# entry instead of failing; and nothing left there survives the run.
+# free of side effects; and nothing left there survives the run.
 SSH_DIR = "~/.ssh"
 
 # Seeded into the masked ~/.ssh, where it is the only configuration ssh has --
 # ~/.ssh/config is read before /etc/ssh/ssh_config and the first value of a
 # keyword wins. All three directives are load-bearing; the README's SSH section
 # says what each one defends against, so don't drop one without reading it.
+# macOS cannot seed a file, so there these reach git as options instead -- see
+# seatbelt_git_ssh_command.
 SSH_CONFIG = """\
 Host *
     BatchMode yes
@@ -137,6 +140,12 @@ def check_bubblewrap():
         print("  sudo apt install bubblewrap    # Debian/Ubuntu", file=sys.stderr)
         print("  sudo dnf install bubblewrap    # Fedora", file=sys.stderr)
         print("  sudo pacman -S bubblewrap      # Arch", file=sys.stderr)
+        sys.exit(1)
+
+
+def check_sandbox_exec():
+    if not Path("/usr/bin/sandbox-exec").is_file():
+        print("Error: macOS sandbox-exec is not installed at /usr/bin/sandbox-exec", file=sys.stderr)
         sys.exit(1)
 
 
@@ -292,6 +301,31 @@ def expand_and_validate_path(path_str: str) -> Path | None:
     return path if path.exists() else None
 
 
+def resolve_mount_paths(path_specs: list[str], warning_kind: str) -> list[Path]:
+    """Resolve existing configured mount paths, preserving their declared order."""
+    paths = []
+    for path_spec in path_specs:
+        path = expand_and_validate_path(path_spec)
+        if path:
+            paths.append(path)
+        else:
+            print(f"Warning: {warning_kind} not found, skipping: {path_spec}", file=sys.stderr)
+    return paths
+
+
+def resolve_rw_paths(rw_paths: list[str]) -> list[Path]:
+    """Resolve explicit writable paths, which are errors rather than optional mounts."""
+    paths = []
+    for rw_path in rw_paths:
+        path = expand_and_validate_path(rw_path)
+        if path:
+            paths.append(path)
+        else:
+            print(f"Error: --rw path not found: {rw_path}", file=sys.stderr)
+            sys.exit(1)
+    return paths
+
+
 def build_bwrap_command(
     workspace: Path,
     profile: str,
@@ -314,26 +348,12 @@ def build_bwrap_command(
     cmd.extend(["--bind", str(workspace), str(workspace)])
 
     # Profile mounts
-    for mount_path in PROFILE_MOUNTS[profile]:
-        path = expand_and_validate_path(mount_path)
-        if path:
-            cmd.extend(["--bind", str(path), str(path)])
-        else:
-            print(
-                f"Warning: Profile mount path not found, skipping: {mount_path}",
-                file=sys.stderr,
-            )
+    for path in resolve_mount_paths(PROFILE_MOUNTS[profile], "Profile mount path"):
+        cmd.extend(["--bind", str(path), str(path)])
 
     # Common read-write mounts
-    for mount_path in COMMON_RW_MOUNTS:
-        path = expand_and_validate_path(mount_path)
-        if path:
-            cmd.extend(["--bind", str(path), str(path)])
-        else:
-            print(
-                f"Warning: Common mount path not found, skipping: {mount_path}",
-                file=sys.stderr,
-            )
+    for path in resolve_mount_paths(COMMON_RW_MOUNTS, "Common mount path"):
+        cmd.extend(["--bind", str(path), str(path)])
 
     # Redirects. After the common mounts, so an entry above cannot re-expose a
     # slice of the real directory on top of the redirect, and before --rw, so an
@@ -368,13 +388,8 @@ def build_bwrap_command(
         cmd.extend(["--unsetenv", "SSH_AUTH_SOCK"])
 
     # Ad-hoc read-write mounts
-    for rw_path in rw_paths:
-        path = expand_and_validate_path(rw_path)
-        if path:
-            cmd.extend(["--bind", str(path), str(path)])
-        else:
-            print(f"Error: --rw path not found: {rw_path}", file=sys.stderr)
-            sys.exit(1)
+    for path in resolve_rw_paths(rw_paths):
+        cmd.extend(["--bind", str(path), str(path)])
 
     # Isolation, then where and what to run.
     cmd.extend(["--unshare-all"])
@@ -385,6 +400,131 @@ def build_bwrap_command(
     cmd.extend(args)
 
     return cmd
+
+
+def seatbelt_git_ssh_command() -> str:
+    """SSH_CONFIG as ssh options, for git to use in place of a seeded config.
+
+    Seatbelt can hide ~/.ssh but cannot put a seeded config in it, so only
+    commands that honor GIT_SSH_COMMAND get these directives. -F /dev/null keeps
+    every config file out. UserKnownHostsFile /dev/null stops ssh from trying
+    the hidden known_hosts, and costs nothing: BatchMode refuses unknown hosts
+    rather than recording them, so a writable file would only ever stay empty.
+    """
+    options = ["-F", "/dev/null", "-o", "UserKnownHostsFile=/dev/null"]
+    for line in SSH_CONFIG.splitlines()[1:]:
+        options += ["-o", "=".join(line.split())]
+    return shlex.join(["ssh", *options])
+
+
+def build_seatbelt_command(
+    workspace: Path,
+    profile: str,
+    rw_paths: list[str],
+    expose_ssh: bool,
+    command: str,
+    args: list[str],
+) -> list[str]:
+    """Build an allow-by-default Seatbelt invocation that denies host writes."""
+    parameters: list[str] = []
+    parameter_number = 0
+
+    def add_path_parameter(prefix: str, path: Path) -> str:
+        # A policy with an interpolated pathname is both hard to quote and easy
+        # to get subtly wrong. Seatbelt receives only canonical paths through
+        # -D, so symlinks such as /tmp cannot bypass a matching rule.
+        nonlocal parameter_number
+        name = f"{prefix}_{parameter_number}"
+        parameter_number += 1
+        parameters.extend(["-D", f"{name}={path.resolve()}"])
+        return name
+
+    policy = ["(version 1)", "(allow default)", "(deny file-write*)"]
+
+    def allow_write(prefix: str, path: Path):
+        name = add_path_parameter(prefix, path)
+        policy.append(f'(allow file-write* (subpath (param "{name}")))')
+
+    # Keep these path sets in the same order and with the same missing-path
+    # behavior as bwrap. Seatbelt has no mounts, but the write surface must be
+    # precisely the one the Linux backend creates.
+    allow_write("WORKSPACE", workspace)
+    for path in resolve_mount_paths(PROFILE_MOUNTS[profile], "Profile mount path"):
+        allow_write("PROFILE", path)
+    for path in resolve_mount_paths(COMMON_RW_MOUNTS, "Common mount path"):
+        allow_write("COMMON", path)
+    allow_write("TMPDIR", Path(tempfile.gettempdir()))
+    policy.append("(allow file-write* (vnode-type CHARACTER-DEVICE))")
+
+    if not expose_ssh:
+        # Denying the real directory, not the spelling through ~/.ssh, matters
+        # because Seatbelt follows symlinks before comparing a rule.
+        ssh_dir = Path(os.path.expanduser(os.path.expandvars(SSH_DIR)))
+        ssh_name = add_path_parameter("SSH_DIR", ssh_dir)
+        policy.append(f'(deny file-read* (subpath (param "{ssh_name}")))')
+
+        # The agent socket is denied by location, not just dropped from the
+        # environment, so a child that finds it again still cannot connect.
+        # launchd's agent is matched by pattern, which holds even when
+        # SSH_AUTH_SOCK is unset; any other agent only by the path it names.
+        policy.append(
+            "(deny network-outbound (remote unix-socket (path-regex"
+            r' #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$")))'
+        )
+        if os.environ.get("SSH_AUTH_SOCK"):
+            socket_name = add_path_parameter(
+                "SSH_AUTH_SOCK", Path(os.environ["SSH_AUTH_SOCK"])
+            )
+            policy.append(
+                "(deny network-outbound (remote unix-socket"
+                f' (path-literal (param "{socket_name}"))))'
+            )
+
+    # Escape-hatch friction, not a containment guarantee. launchctl submit and
+    # bootstrap fail under this policy as a whole, but which rule stops them was
+    # never isolated; see the README's macOS section.
+    policy.append("(deny appleevent-send)")
+    policy.append(
+        '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))'
+    )
+
+    # These come last: in particular, --rw ~/.ssh deliberately re-allows reads
+    # after the default SSH mask as well as making the directory writable.
+    for path in resolve_rw_paths(rw_paths):
+        name = add_path_parameter("RW", path)
+        policy.append(f'(allow file-read* (subpath (param "{name}")))')
+        policy.append(f'(allow file-write* (subpath (param "{name}")))')
+
+    return [
+        "/usr/bin/sandbox-exec",
+        *parameters,
+        "-p",
+        "\n".join(policy),
+        command,
+        *args,
+    ]
+
+
+def seatbelt_environment(expose_ssh: bool) -> dict[str, str]:
+    """Variables sbox sets for the command; SSH_AUTH_SOCK is unset separately."""
+    environment = {
+        "SBOX": "1",
+        "UV_TOOL_DIR": str(Path(os.path.expanduser("~/.cache/agent-uv-tools")).resolve()),
+    }
+    if not expose_ssh:
+        environment["GIT_SSH_COMMAND"] = seatbelt_git_ssh_command()
+    return environment
+
+
+def seatbelt_shell_command(
+    command: list[str], environment: dict[str, str], unset_ssh_auth_sock: bool
+) -> list[str]:
+    """Make --dry-run's environment visible and directly reproducible in a shell."""
+    shell_command = ["/usr/bin/env"]
+    if unset_ssh_auth_sock:
+        shell_command.extend(["-u", "SSH_AUTH_SOCK"])
+    shell_command.extend(f"{name}={value}" for name, value in environment.items())
+    return shell_command + command
 
 
 def main():
@@ -456,7 +596,11 @@ Examples:
     args = parser.parse_args()
     command, command_args = args.command, args.args
 
-    check_bubblewrap()
+    is_macos = sys.platform == "darwin"
+    if is_macos:
+        check_sandbox_exec()
+    else:
+        check_bubblewrap()
 
     work_dir = Path.cwd()
     workspace, rel_path = resolve_workspace(args.workspace, work_dir)
@@ -479,26 +623,44 @@ Examples:
         )
     command_args = injected + command_args
 
-    bwrap_cmd = build_bwrap_command(
-        workspace, profile, args.rw, args.ssh, work_dir, command, command_args
-    )
+    if is_macos:
+        sandbox_cmd = build_seatbelt_command(
+            workspace, profile, args.rw, args.ssh, command, command_args
+        )
+        overrides = seatbelt_environment(args.ssh)
 
-    if args.dry_run:
-        print(" ".join(bwrap_cmd))
+        if args.dry_run:
+            shell_cmd = seatbelt_shell_command(sandbox_cmd, overrides, not args.ssh)
+            print(shlex.join(shell_cmd))
+            return 0
+
+        # macOS has no bind mounts, so there are no redirect directories to
+        # create: this backend writes nothing on the host.
+        environment = {**os.environ, **overrides}
+        if not args.ssh:
+            environment.pop("SSH_AUTH_SOCK", None)
+    else:
+        sandbox_cmd = build_bwrap_command(
+            workspace, profile, args.rw, args.ssh, work_dir, command, command_args
+        )
+        environment = dict(os.environ)
+
+        if args.dry_run:
+            print(" ".join(sandbox_cmd))
+            if ssh_config_is_seeded(args.ssh):
+                print(
+                    f"sbox: fd {SSH_CONFIG_FD} carries the seeded ~/.ssh/config; the"
+                    f" printed command needs it redirected to run by hand",
+                    file=sys.stderr,
+                )
+            return 0
+
+        create_redirect_dirs()
+
+        # Only when the command actually reads it -- an unopened SSH_CONFIG_FD
+        # would make bwrap fail on a descriptor that isn't there.
         if ssh_config_is_seeded(args.ssh):
-            print(
-                f"sbox: fd {SSH_CONFIG_FD} carries the seeded ~/.ssh/config; the"
-                f" printed command needs it redirected to run by hand",
-                file=sys.stderr,
-            )
-        return 0
-
-    create_redirect_dirs()
-
-    # Only when the command actually reads it -- an unopened SSH_CONFIG_FD would
-    # make bwrap fail on a descriptor that isn't there.
-    if ssh_config_is_seeded(args.ssh):
-        open_ssh_config_fd()
+            open_ssh_config_fd()
 
     if rel_path == Path("."):
         print(f"sbox [{profile}]: {workspace}", file=sys.stderr)
@@ -506,11 +668,14 @@ Examples:
         print(f"sbox [{profile}]: {workspace} ({rel_path})", file=sys.stderr)
 
     try:
-        # Replace this process with bwrap; main() does not return on success.
-        os.execvp("bwrap", bwrap_cmd)
+        # Replace this process with the sandbox; main() does not return on
+        # success. sandbox-exec is named by absolute path, so PATH cannot choose
+        # a different sandbox implementation on macOS.
+        os.execvpe(sandbox_cmd[0], sandbox_cmd, environment)
     except FileNotFoundError:
         print(
-            "Error: Failed to execute bwrap (this should not happen after check)",
+            f"Error: Failed to execute {sandbox_cmd[0]}"
+            " (this should not happen after check)",
             file=sys.stderr,
         )
         return 1
