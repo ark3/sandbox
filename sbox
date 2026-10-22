@@ -3,8 +3,12 @@
 
 import argparse
 import os
+import shlex
 import shutil
 import sys
+import tempfile
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 # Configuration
@@ -137,6 +141,12 @@ def check_bubblewrap():
         print("  sudo apt install bubblewrap    # Debian/Ubuntu", file=sys.stderr)
         print("  sudo dnf install bubblewrap    # Fedora", file=sys.stderr)
         print("  sudo pacman -S bubblewrap      # Arch", file=sys.stderr)
+        sys.exit(1)
+
+
+def check_sandbox_exec():
+    if not Path("/usr/bin/sandbox-exec").is_file():
+        print("Error: macOS sandbox-exec is not installed at /usr/bin/sandbox-exec", file=sys.stderr)
         sys.exit(1)
 
 
@@ -292,6 +302,33 @@ def expand_and_validate_path(path_str: str) -> Path | None:
     return path if path.exists() else None
 
 
+def resolve_mount_paths(
+    path_specs: list[str], warning_kind: str, *, realpath: bool = False
+) -> list[Path]:
+    """Resolve existing configured mount paths, preserving their declared order."""
+    paths = []
+    for path_spec in path_specs:
+        path = expand_and_validate_path(path_spec)
+        if path:
+            paths.append(path.resolve() if realpath else path)
+        else:
+            print(f"Warning: {warning_kind} not found, skipping: {path_spec}", file=sys.stderr)
+    return paths
+
+
+def resolve_rw_paths(rw_paths: list[str], *, realpath: bool = False) -> list[Path]:
+    """Resolve explicit writable paths, which are errors rather than optional mounts."""
+    paths = []
+    for rw_path in rw_paths:
+        path = expand_and_validate_path(rw_path)
+        if path:
+            paths.append(path.resolve() if realpath else path)
+        else:
+            print(f"Error: --rw path not found: {rw_path}", file=sys.stderr)
+            sys.exit(1)
+    return paths
+
+
 def build_bwrap_command(
     workspace: Path,
     profile: str,
@@ -314,26 +351,12 @@ def build_bwrap_command(
     cmd.extend(["--bind", str(workspace), str(workspace)])
 
     # Profile mounts
-    for mount_path in PROFILE_MOUNTS[profile]:
-        path = expand_and_validate_path(mount_path)
-        if path:
-            cmd.extend(["--bind", str(path), str(path)])
-        else:
-            print(
-                f"Warning: Profile mount path not found, skipping: {mount_path}",
-                file=sys.stderr,
-            )
+    for path in resolve_mount_paths(PROFILE_MOUNTS[profile], "Profile mount path"):
+        cmd.extend(["--bind", str(path), str(path)])
 
     # Common read-write mounts
-    for mount_path in COMMON_RW_MOUNTS:
-        path = expand_and_validate_path(mount_path)
-        if path:
-            cmd.extend(["--bind", str(path), str(path)])
-        else:
-            print(
-                f"Warning: Common mount path not found, skipping: {mount_path}",
-                file=sys.stderr,
-            )
+    for path in resolve_mount_paths(COMMON_RW_MOUNTS, "Common mount path"):
+        cmd.extend(["--bind", str(path), str(path)])
 
     # Redirects. After the common mounts, so an entry above cannot re-expose a
     # slice of the real directory on top of the redirect, and before --rw, so an
@@ -368,13 +391,8 @@ def build_bwrap_command(
         cmd.extend(["--unsetenv", "SSH_AUTH_SOCK"])
 
     # Ad-hoc read-write mounts
-    for rw_path in rw_paths:
-        path = expand_and_validate_path(rw_path)
-        if path:
-            cmd.extend(["--bind", str(path), str(path)])
-        else:
-            print(f"Error: --rw path not found: {rw_path}", file=sys.stderr)
-            sys.exit(1)
+    for path in resolve_rw_paths(rw_paths):
+        cmd.extend(["--bind", str(path), str(path)])
 
     # Isolation, then where and what to run.
     cmd.extend(["--unshare-all"])
@@ -385,6 +403,159 @@ def build_bwrap_command(
     cmd.extend(args)
 
     return cmd
+
+
+@dataclass(frozen=True)
+class SeatbeltSSHState:
+    """Per-run files that make git's SSH invocation fail without touching ~/.ssh."""
+
+    directory: Path
+    config: Path
+    known_hosts: Path
+
+
+def plan_seatbelt_ssh_state() -> SeatbeltSSHState:
+    """Choose private state paths without creating them, so --dry-run is inert."""
+    tmpdir = Path(tempfile.gettempdir()).resolve()
+    directory = tmpdir / f"sbox-ssh-{uuid.uuid4().hex}"
+    return SeatbeltSSHState(directory, directory / "config", directory / "known_hosts")
+
+
+def seatbelt_ssh_config(state: SeatbeltSSHState) -> str:
+    """Keep SSH_CONFIG's constraints while making known_hosts private to this run."""
+    return SSH_CONFIG + f"    UserKnownHostsFile {shlex.quote(str(state.known_hosts))}\n"
+
+
+def create_seatbelt_ssh_state(state: SeatbeltSSHState):
+    """Create only sbox's private SSH state immediately before sandbox-exec."""
+    state.directory.mkdir(mode=0o700)
+    state.config.write_text(seatbelt_ssh_config(state))
+    state.config.chmod(0o600)
+    state.known_hosts.touch(mode=0o600)
+    state.known_hosts.chmod(0o600)
+
+
+def seatbelt_path(path: Path) -> Path:
+    """Resolve every path before it becomes a Seatbelt policy parameter."""
+    return path.resolve()
+
+
+def build_seatbelt_command(
+    workspace: Path,
+    profile: str,
+    rw_paths: list[str],
+    expose_ssh: bool,
+    command: str,
+    args: list[str],
+) -> list[str]:
+    """Build an allow-by-default Seatbelt invocation that denies host writes."""
+    parameters: list[str] = []
+    parameter_number = 0
+
+    def add_path_parameter(prefix: str, path: Path) -> str:
+        # A policy with an interpolated pathname is both hard to quote and easy
+        # to get subtly wrong. Seatbelt receives only canonical paths through
+        # -D, so symlinks such as /tmp cannot bypass a matching rule.
+        nonlocal parameter_number
+        name = f"{prefix}_{parameter_number}"
+        parameter_number += 1
+        parameters.extend(["-D", f"{name}={seatbelt_path(path)}"])
+        return name
+
+    policy = ["(version 1)", "(allow default)", "(deny file-write*)"]
+
+    def allow_write(prefix: str, path: Path):
+        name = add_path_parameter(prefix, path)
+        policy.append(f'(allow file-write* (subpath (param "{name}")))')
+
+    # Keep these path sets in the same order and with the same missing-path
+    # behavior as bwrap. Seatbelt has no mounts, but the write surface must be
+    # precisely the one the Linux backend creates.
+    allow_write("WORKSPACE", workspace)
+    for path in resolve_mount_paths(
+        PROFILE_MOUNTS[profile], "Profile mount path", realpath=True
+    ):
+        allow_write("PROFILE", path)
+    for path in resolve_mount_paths(COMMON_RW_MOUNTS, "Common mount path", realpath=True):
+        allow_write("COMMON", path)
+    allow_write("TMPDIR", Path(tempfile.gettempdir()))
+    policy.append("(allow file-write* (vnode-type CHARACTER-DEVICE))")
+
+    if not expose_ssh:
+        # Denying the real directory, not the spelling through ~/.ssh, matters
+        # because Seatbelt follows symlinks before comparing a rule.
+        ssh_dir = Path(os.path.expanduser(os.path.expandvars(SSH_DIR)))
+        ssh_name = add_path_parameter("SSH_DIR", ssh_dir)
+        policy.append(f'(deny file-read* (subpath (param "{ssh_name}")))')
+
+        # Keep the socket inaccessible even if a child recreates its environment.
+        socket = Path(os.environ.get("SSH_AUTH_SOCK", os.devnull))
+        socket_name = add_path_parameter("SSH_AUTH_SOCK", socket)
+        policy.append(
+            f'(deny network-outbound (remote unix-socket (path-literal (param "{socket_name}"))))'
+        )
+
+    # launchctl can otherwise hand work to services outside this policy. These
+    # two denies are escape-hatch friction, not a containment guarantee.
+    policy.append("(deny appleevent-send)")
+    policy.append(
+        '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))'
+    )
+
+    # These come last: in particular, --rw ~/.ssh deliberately re-allows reads
+    # after the default SSH mask as well as making the directory writable.
+    for path in resolve_rw_paths(rw_paths, realpath=True):
+        name = add_path_parameter("RW", path)
+        policy.append(f'(allow file-read* (subpath (param "{name}")))')
+        policy.append(f'(allow file-write* (subpath (param "{name}")))')
+
+    return [
+        "/usr/bin/sandbox-exec",
+        *parameters,
+        "-p",
+        "\n".join(policy),
+        command,
+        *args,
+    ]
+
+
+def seatbelt_environment(state: SeatbeltSSHState | None) -> tuple[dict[str, str], bool]:
+    """Return macOS-only environment changes and whether to hide the agent variable."""
+    environment = {
+        "SBOX": "1",
+        "UV_TOOL_DIR": str(Path(os.path.expanduser("~/.cache/agent-uv-tools")).resolve()),
+    }
+    if state:
+        environment["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(state.config))}"
+    return environment, state is not None
+
+
+def seatbelt_shell_command(
+    command: list[str], environment: dict[str, str], unset_ssh_auth_sock: bool
+) -> list[str]:
+    """Make --dry-run's environment visible and directly reproducible in a shell."""
+    shell_command = ["/usr/bin/env"]
+    if unset_ssh_auth_sock:
+        shell_command.extend(["-u", "SSH_AUTH_SOCK"])
+    shell_command.extend(f"{name}={value}" for name, value in environment.items())
+    return shell_command + command
+
+
+def print_seatbelt_dry_run(
+    command: list[str], environment: dict[str, str], state: SeatbeltSSHState | None
+):
+    """Print all host-state setup and the invocation without performing either."""
+    if state:
+        print(f"mkdir -m 700 {shlex.quote(str(state.directory))}")
+        print(
+            f"printf %s {shlex.quote(seatbelt_ssh_config(state))} > "
+            f"{shlex.quote(str(state.config))} && chmod 600 {shlex.quote(str(state.config))}"
+        )
+        print(
+            f": > {shlex.quote(str(state.known_hosts))} && chmod 600 "
+            f"{shlex.quote(str(state.known_hosts))}"
+        )
+    print(shlex.join(seatbelt_shell_command(command, environment, state is not None)))
 
 
 def main():
@@ -456,7 +627,11 @@ Examples:
     args = parser.parse_args()
     command, command_args = args.command, args.args
 
-    check_bubblewrap()
+    is_macos = sys.platform == "darwin"
+    if is_macos:
+        check_sandbox_exec()
+    else:
+        check_bubblewrap()
 
     work_dir = Path.cwd()
     workspace, rel_path = resolve_workspace(args.workspace, work_dir)
@@ -478,6 +653,42 @@ Examples:
             f"sbox: adding {command_name} args: {' '.join(injected)}", file=sys.stderr
         )
     command_args = injected + command_args
+
+    if is_macos:
+        ssh_state = None if args.ssh else plan_seatbelt_ssh_state()
+        seatbelt_cmd = build_seatbelt_command(
+            workspace, profile, args.rw, args.ssh, command, command_args
+        )
+        environment, unset_ssh_auth_sock = seatbelt_environment(ssh_state)
+
+        if args.dry_run:
+            print_seatbelt_dry_run(seatbelt_cmd, environment, ssh_state)
+            return 0
+
+        # macOS has no bind mounts, so redirects stay Linux-only. The only host
+        # state this backend makes is the per-run SSH configuration it controls.
+        if ssh_state:
+            create_seatbelt_ssh_state(ssh_state)
+
+        if rel_path == Path("."):
+            print(f"sbox [{profile}]: {workspace}", file=sys.stderr)
+        else:
+            print(f"sbox [{profile}]: {workspace} ({rel_path})", file=sys.stderr)
+
+        exec_environment = {**os.environ, **environment}
+        if unset_ssh_auth_sock:
+            exec_environment.pop("SSH_AUTH_SOCK", None)
+        try:
+            # Replace this process with sandbox-exec, whose path is deliberately
+            # absolute so PATH cannot choose a different sandbox implementation.
+            os.execve(seatbelt_cmd[0], seatbelt_cmd, exec_environment)
+        except FileNotFoundError:
+            print(
+                "Error: Failed to execute /usr/bin/sandbox-exec (this should not happen after check)",
+                file=sys.stderr,
+            )
+            return 1
+        # unreachable
 
     bwrap_cmd = build_bwrap_command(
         workspace, profile, args.rw, args.ssh, work_dir, command, command_args

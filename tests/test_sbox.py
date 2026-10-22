@@ -14,11 +14,18 @@ Run with `uv run pytest`.
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+
+BWRAP_ONLY = pytest.mark.skipif(
+    sys.platform == "darwin", reason="asserts bubblewrap mounts or redirects"
+)
 
 
 # --- end-to-end: argument passthrough and injection -------------------------
@@ -135,6 +142,7 @@ def _bwrap_args(stdout: str) -> list[str]:
     return stdout.rstrip().split(" ")
 
 
+@BWRAP_ONLY
 def test_maven_repo_is_redirected(run_sbox, tmp_path):
     home = tmp_path / "home"
     r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
@@ -142,6 +150,7 @@ def test_maven_repo_is_redirected(run_sbox, tmp_path):
     assert f"--bind {home}/.cache/agent-m2 {home}/.m2/repository" in r.stdout
 
 
+@BWRAP_ONLY
 def test_dry_run_creates_no_directories(run_sbox, tmp_path):
     # create_redirect_dirs() is the only thing sbox writes outside the sandbox,
     # and it must stay off the --dry-run path.
@@ -153,6 +162,7 @@ def test_dry_run_creates_no_directories(run_sbox, tmp_path):
     assert not (home / ".cache" / "agent-m2").exists()
 
 
+@BWRAP_ONLY
 def test_redirect_comes_after_common_mounts(run_sbox, tmp_path):
     # Order matters: a common mount landing after the redirect could re-expose
     # part of the real ~/.m2 on top of it.
@@ -163,6 +173,7 @@ def test_redirect_comes_after_common_mounts(run_sbox, tmp_path):
     assert argv.index(f"{home}/.cache/agent-m2") > argv.index(f"{home}/.cache")
 
 
+@BWRAP_ONLY
 def test_explicit_rw_wins_over_redirect(run_sbox, tmp_path):
     # --rw is applied last, so a user who really wants the real repository can
     # mount it back over the redirect.
@@ -186,6 +197,7 @@ def test_explicit_rw_wins_over_redirect(run_sbox, tmp_path):
     assert rw_bind[0] > argv.index(f"{home}/.cache/agent-m2")
 
 
+@BWRAP_ONLY
 def test_real_m2_cache_is_not_mounted(run_sbox, tmp_path):
     # The old ~/.m2/repository/.cache entry would punch a hole through the
     # redirect; it must be gone from COMMON_RW_MOUNTS.
@@ -199,6 +211,7 @@ def test_real_m2_cache_is_not_mounted(run_sbox, tmp_path):
 # --ssh is given.
 
 
+@BWRAP_ONLY
 def test_ssh_dir_is_masked_by_default(run_sbox, tmp_path):
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
@@ -207,6 +220,7 @@ def test_ssh_dir_is_masked_by_default(run_sbox, tmp_path):
     assert f"--tmpfs {home}/.ssh" in r.stdout
 
 
+@BWRAP_ONLY
 def test_ssh_agent_socket_is_dropped_by_default(run_sbox, tmp_path):
     # Hiding the key files is theater on its own: an agent socket survives
     # --unshare-all and carries usable keys.
@@ -216,6 +230,7 @@ def test_ssh_agent_socket_is_dropped_by_default(run_sbox, tmp_path):
     assert "--unsetenv SSH_AUTH_SOCK" in r.stdout
 
 
+@BWRAP_ONLY
 def test_ssh_flag_exposes_real_config(run_sbox, tmp_path):
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
@@ -225,6 +240,7 @@ def test_ssh_flag_exposes_real_config(run_sbox, tmp_path):
     assert "SSH_AUTH_SOCK" not in r.stdout
 
 
+@BWRAP_ONLY
 def test_missing_ssh_dir_is_skipped(run_sbox, tmp_path):
     # A tmpfs needs an existing mount point, and a read-only root cannot supply
     # one -- but the agent socket must still go, since it can hold keys with no
@@ -237,6 +253,7 @@ def test_missing_ssh_dir_is_skipped(run_sbox, tmp_path):
     assert "--unsetenv SSH_AUTH_SOCK" in r.stdout
 
 
+@BWRAP_ONLY
 def test_masking_creates_no_directories(run_sbox, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -245,6 +262,7 @@ def test_masking_creates_no_directories(run_sbox, tmp_path):
     assert not (home / ".ssh").exists()
 
 
+@BWRAP_ONLY
 def test_ssh_config_is_seeded(run_sbox, tmp_path):
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
@@ -253,6 +271,7 @@ def test_ssh_config_is_seeded(run_sbox, tmp_path):
     assert f"--ro-bind-data 21 {home}/.ssh/config" in r.stdout
 
 
+@BWRAP_ONLY
 def test_seeded_config_lands_after_the_tmpfs(run_sbox, tmp_path):
     # The tmpfs is the config's mount point; emitted the other way round, the
     # tmpfs would wipe it straight back out.
@@ -263,6 +282,7 @@ def test_seeded_config_lands_after_the_tmpfs(run_sbox, tmp_path):
     assert argv.index("--ro-bind-data") > argv.index("--tmpfs")
 
 
+@BWRAP_ONLY
 def test_seeded_config_cannot_reach_the_real_ssh_dir(run_sbox, tmp_path):
     # The safety property behind the whole ordering: --ro-bind-data writes at
     # the path it is given, so if it were emitted after `--rw ~/.ssh` bound the
@@ -299,6 +319,7 @@ def test_ssh_flag_seeds_nothing(run_sbox, tmp_path):
     assert "--ro-bind-data" not in r.stdout
 
 
+@BWRAP_ONLY
 def test_dry_run_explains_the_config_fd(run_sbox, tmp_path):
     # The printed command references an inherited fd, so it is not runnable as
     # pasted; say so rather than letting it fail cryptically.
@@ -308,6 +329,7 @@ def test_dry_run_explains_the_config_fd(run_sbox, tmp_path):
     assert "fd 21" in r.stderr
 
 
+@BWRAP_ONLY
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="needs real bubblewrap")
 def test_seeded_config_is_readable_and_locked_down(sbox_path, tmp_path):
     """Run real bwrap: the config must arrive intact, 0600, and immutable.
@@ -346,6 +368,7 @@ def test_seeded_config_is_readable_and_locked_down(sbox_path, tmp_path):
     assert (home / ".ssh" / "config").exists() is False  # nothing leaked to the host
 
 
+@BWRAP_ONLY
 def test_explicit_rw_wins_over_ssh_mask(run_sbox, tmp_path):
     # --rw is applied after the mask, so a run that genuinely needs the real
     # directory -- writable -- can have it back.
@@ -364,6 +387,146 @@ def test_explicit_rw_wins_over_ssh_mask(run_sbox, tmp_path):
     ]
     assert len(rw_bind) == 1
     assert rw_bind[0] > argv.index("--tmpfs")
+
+
+# --- macOS Seatbelt ---------------------------------------------------------
+# These run the experimental backend rather than inspecting its dry-run output:
+# Seatbelt's matching and denial behavior are the property sbox is relying on.
+
+
+@pytest.fixture
+def run_macos_sbox(sbox_path, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+
+    def _run(*args, extra_env=None):
+        return subprocess.run(
+            [sys.executable, str(sbox_path), *args],
+            cwd=workspace,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "TMPDIR": str(tmpdir),
+                **(extra_env or {}),
+            },
+            capture_output=True,
+            text=True,
+        )
+
+    return _run, workspace, home, tmpdir
+
+
+MACOS_ONLY = pytest.mark.skipif(sys.platform != "darwin", reason="needs Seatbelt")
+
+
+@MACOS_ONLY
+def test_seatbelt_dry_run_prints_parameterized_policy(run_macos_sbox):
+    run, workspace, home, tmpdir = run_macos_sbox
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir()
+    r = run("--dry-run", "--rw", str(ssh_dir), "--profile", "none", "sh")
+
+    assert r.returncode == 0
+    assert "/usr/bin/sandbox-exec" in r.stdout
+    assert "SBOX=1" in r.stdout
+    assert "UV_TOOL_DIR=" in r.stdout
+    assert "GIT_SSH_COMMAND=" in r.stdout
+    assert "(version 1)" in r.stdout
+    assert "(allow default)" in r.stdout
+    assert "(deny file-write*)" in r.stdout
+    assert f"-D WORKSPACE_0={workspace.resolve()}" in r.stdout
+    assert f"-D TMPDIR_" in r.stdout
+    assert str(tmpdir.resolve()) in r.stdout
+    assert "(allow file-write* (vnode-type CHARACTER-DEVICE))" in r.stdout
+    assert "(deny file-read* (subpath (param \"SSH_DIR_" in r.stdout
+    assert "(deny network-outbound (remote unix-socket (path-literal (param \"SSH_AUTH_SOCK_" in r.stdout
+    assert "(deny appleevent-send)" in r.stdout
+    assert '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))' in r.stdout
+    assert "(allow file-read* (subpath (param \"RW_" in r.stdout
+    assert "~/.m2/repository" not in r.stdout
+    assert "MAVEN_ARGS" not in r.stdout
+    assert not list(tmpdir.glob("sbox-ssh-*"))
+
+
+@MACOS_ONLY
+def test_seatbelt_workspace_is_writable(run_macos_sbox):
+    run, workspace, _, _ = run_macos_sbox
+    created = workspace / "created"
+    r = run("--profile", "none", "sh", "-c", f"touch {created}")
+
+    assert r.returncode == 0
+    assert created.exists()
+
+
+@MACOS_ONLY
+def test_seatbelt_home_is_not_writable(run_macos_sbox):
+    run, _, home, _ = run_macos_sbox
+    r = run("--profile", "none", "sh", "-c", f"touch {home / 'blocked'}")
+
+    assert r.returncode != 0
+    assert "Operation not permitted" in r.stderr
+    assert not (home / "blocked").exists()
+
+
+@MACOS_ONLY
+def test_seatbelt_hides_ssh_files(run_macos_sbox):
+    run, _, home, _ = run_macos_sbox
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir()
+    secret = ssh_dir / "id_ed25519"
+    secret.write_text("PRIVATE KEY")
+    r = run("--profile", "none", "cat", str(secret))
+
+    assert r.returncode != 0
+    assert "Operation not permitted" in r.stderr
+    assert "PRIVATE KEY" not in r.stdout
+
+
+@MACOS_ONLY
+def test_seatbelt_blocks_the_agent_socket(run_macos_sbox):
+    run, _, _, tmpdir = run_macos_sbox
+    agent_socket = tmpdir / "agent.sock"
+    probe = (
+        "import os, socket; "
+        "sock = socket.socket(socket.AF_UNIX); "
+        "sock.connect(os.environ['SBOX_TEST_AGENT_SOCKET'])"
+    )
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="sbox-agent-") as socket_dir:
+        agent_socket = Path(socket_dir) / "agent.sock"
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(agent_socket))
+            r = run(
+                "--profile",
+                "none",
+                sys.executable,
+                "-c",
+                probe,
+                extra_env={
+                    "SSH_AUTH_SOCK": str(agent_socket),
+                    "SBOX_TEST_AGENT_SOCKET": str(agent_socket),
+                },
+            )
+
+    assert r.returncode != 0
+    assert "Operation not permitted" in r.stderr
+
+
+@MACOS_ONLY
+def test_seatbelt_rw_ssh_restores_reading(run_macos_sbox):
+    run, _, home, _ = run_macos_sbox
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir()
+    secret = ssh_dir / "id_ed25519"
+    secret.write_text("PRIVATE KEY")
+    r = run("--rw", str(ssh_dir), "--profile", "none", "cat", str(secret))
+
+    assert r.returncode == 0
+    assert r.stdout == "PRIVATE KEY"
 
 
 # --- resolve_profile --------------------------------------------------------
@@ -389,6 +552,7 @@ def test_acp_variant_mirrors_its_agent_mounts(sbox, variant, agent):
     assert sbox.PROFILE_MOUNTS[variant] == sbox.PROFILE_MOUNTS[agent]
 
 
+@BWRAP_ONLY
 def test_profile_matches_command_basename(run_sbox, tmp_path):
     # An absolute path to the tool is still the tool, for the profile exactly
     # as it already was for injection: both lookups key off the basename, so
@@ -400,6 +564,7 @@ def test_profile_matches_command_basename(run_sbox, tmp_path):
     assert f"--bind {home}/.codex {home}/.codex" in r.stdout
 
 
+@BWRAP_ONLY
 def test_all_auto_profile_mounts_every_supported_agent_state(run_sbox, tmp_path):
     home = tmp_path / "home"
     agent_state_paths = [
