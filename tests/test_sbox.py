@@ -13,6 +13,7 @@ Run with `uv run pytest`.
 """
 
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -429,13 +430,21 @@ def test_seatbelt_dry_run_prints_parameterized_policy(run_macos_sbox):
     run, workspace, home, tmpdir = run_macos_sbox
     ssh_dir = home / ".ssh"
     ssh_dir.mkdir()
-    r = run("--dry-run", "--rw", str(ssh_dir), "--profile", "none", "sh")
+    r = run(
+        "--dry-run",
+        "--rw",
+        str(ssh_dir),
+        "--profile",
+        "none",
+        "sh",
+        extra_env={"SSH_AUTH_SOCK": "/tmp/sbox-test-agent.sock"},
+    )
 
     assert r.returncode == 0
     assert "/usr/bin/sandbox-exec" in r.stdout
     assert "SBOX=1" in r.stdout
     assert "UV_TOOL_DIR=" in r.stdout
-    assert "GIT_SSH_COMMAND=" in r.stdout
+    assert "GIT_SSH_COMMAND=ssh -F /dev/null" in r.stdout
     assert "(version 1)" in r.stdout
     assert "(allow default)" in r.stdout
     assert "(deny file-write*)" in r.stdout
@@ -445,12 +454,12 @@ def test_seatbelt_dry_run_prints_parameterized_policy(run_macos_sbox):
     assert "(allow file-write* (vnode-type CHARACTER-DEVICE))" in r.stdout
     assert "(deny file-read* (subpath (param \"SSH_DIR_" in r.stdout
     assert "(deny network-outbound (remote unix-socket (path-literal (param \"SSH_AUTH_SOCK_" in r.stdout
+    assert "com\\.apple\\.launchd" in r.stdout
     assert "(deny appleevent-send)" in r.stdout
     assert '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))' in r.stdout
     assert "(allow file-read* (subpath (param \"RW_" in r.stdout
-    assert "~/.m2/repository" not in r.stdout
+    assert ".m2" not in r.stdout
     assert "MAVEN_ARGS" not in r.stdout
-    assert not list(tmpdir.glob("sbox-ssh-*"))
 
 
 @MACOS_ONLY
@@ -489,8 +498,7 @@ def test_seatbelt_hides_ssh_files(run_macos_sbox):
 
 @MACOS_ONLY
 def test_seatbelt_blocks_the_agent_socket(run_macos_sbox):
-    run, _, _, tmpdir = run_macos_sbox
-    agent_socket = tmpdir / "agent.sock"
+    run, _, _, _ = run_macos_sbox
     probe = (
         "import os, socket; "
         "sock = socket.socket(socket.AF_UNIX); "
@@ -514,6 +522,53 @@ def test_seatbelt_blocks_the_agent_socket(run_macos_sbox):
 
     assert r.returncode != 0
     assert "Operation not permitted" in r.stderr
+
+
+@MACOS_ONLY
+def test_seatbelt_blocks_launchd_agent_without_the_variable(
+    run_macos_sbox, monkeypatch
+):
+    # launchd's agent socket is denied by pattern, so unsetting SSH_AUTH_SOCK
+    # before launch does not leave the socket reachable to a child that finds it.
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    run, _, _, _ = run_macos_sbox
+    probe = "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])"
+    with tempfile.TemporaryDirectory(
+        dir="/tmp", prefix="com.apple.launchd."
+    ) as socket_dir:
+        agent_socket = Path(socket_dir) / "Listeners"
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(agent_socket))
+            r = run(
+                "--profile", "none", sys.executable, "-c", probe, str(agent_socket)
+            )
+
+    assert r.returncode != 0
+    assert "Operation not permitted" in r.stderr
+
+
+# Building the policy is plain Python, so these run on every platform.
+
+
+def test_git_ssh_command_carries_every_ssh_config_directive(sbox):
+    argv = shlex.split(sbox.seatbelt_git_ssh_command())
+
+    assert argv[:3] == ["ssh", "-F", "/dev/null"]
+    for line in sbox.SSH_CONFIG.splitlines()[1:]:
+        key, value = line.split()
+        assert f"{key}={value}" in argv
+
+
+def test_seatbelt_policy_denies_launchd_agent_without_the_variable(
+    sbox, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cmd = sbox.build_seatbelt_command(tmp_path, "none", [], False, "sh", [])
+    policy = cmd[cmd.index("-p") + 1]
+
+    assert r'path-regex #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$"' in policy
+    assert not any(arg.startswith("SSH_AUTH_SOCK_") for arg in cmd)
 
 
 @MACOS_ONLY
