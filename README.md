@@ -137,7 +137,7 @@ The rest of the filesystem is read-only, not invisible — a sandboxed tool can 
 
 Both halves matter. Masking the key files alone would be theater: an ssh-agent socket survives `--unshare-all`, and keys loaded into the agent stay usable through it whether or not the sandbox can see the files they came from.
 
-A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, the directory is writable so `ssh` can record a `known_hosts` entry instead of failing, and nothing written there survives the run.
+A `tmpfs` rather than an empty directory somewhere on disk means nothing is created on the host, and nothing written there survives the run.
 
 The directory is not left entirely bare: a small `~/.ssh/config` is seeded into it — `SSH_CONFIG` in `sbox` — and it is the only configuration `ssh` sees. It sets three directives, each load-bearing:
 

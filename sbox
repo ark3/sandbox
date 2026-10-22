@@ -56,10 +56,9 @@ REDIRECTS = {
 # Replaced with an empty tmpfs, with SSH_AUTH_SOCK unset alongside it. The
 # threat model, the cost, and how to opt out are in the README's SSH section.
 #
-# A tmpfs rather than a bind of some empty directory, for three reasons that
+# A tmpfs rather than a bind of some empty directory, for two reasons that
 # constrain any replacement: nothing is created on the host, so --dry-run stays
-# free of side effects; the directory is writable, so ssh records a known_hosts
-# entry instead of failing; and nothing left there survives the run.
+# free of side effects; and nothing left there survives the run.
 SSH_DIR = "~/.ssh"
 
 # Seeded into the masked ~/.ssh, where it is the only configuration ssh has --
