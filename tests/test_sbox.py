@@ -192,6 +192,23 @@ def test_pass_through_executes_without_sandbox_setup(sbox_path, tmp_path):
     for key in ("SBOX", "DANGER_SBOX_PASS_THROUGH", "SSH_AUTH_SOCK", "UV_TOOL_DIR"):
         assert child_env[key] == env[key]
     assert not (tmp_path / "home").exists()
+    assert (
+        "ignoring --workspace, --profile, --rw, --no-ssh:"
+        " the existing session's access applies" in r.stderr
+    )
+
+
+def test_pass_through_without_sandbox_options_warns_nothing(run_sbox):
+    r = run_sbox("bash", extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"})
+    assert r.returncode == 0
+    assert "ignoring" not in r.stderr
+
+
+def test_pass_through_names_ssh_as_given(run_sbox):
+    r = run_sbox(
+        "--ssh", "bash", extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"}
+    )
+    assert "ignoring --ssh:" in r.stderr
 
 
 def test_pass_through_dry_run_quotes_arguments(run_sbox):

@@ -527,16 +527,34 @@ def seatbelt_shell_command(
     return shell_command + command
 
 
-def run_directly(command: str, command_args: list[str], dry_run: bool) -> int:
+def run_directly(
+    command: str, command_args: list[str], args: argparse.Namespace
+) -> int:
     """Run the command in place of a nested sandbox, for pass-through.
 
     The cwd and environment are inherited unchanged; sandbox options cannot
-    alter the existing session's access and are intentionally ignored here.
-    Returns only on --dry-run or failure.
+    alter the existing session's access, so any that were given are named as
+    ignored rather than silently dropped. Returns only on --dry-run or failure.
     """
     print("sbox: passing through inside existing session", file=sys.stderr)
+    ignored = [
+        flag
+        for flag, given in [
+            ("--workspace", args.workspace is not None),
+            ("--profile", args.profile is not None),
+            ("--rw", bool(args.rw)),
+            ("--ssh" if args.ssh else "--no-ssh", args.ssh is not None),
+        ]
+        if given
+    ]
+    if ignored:
+        print(
+            f"sbox: ignoring {', '.join(ignored)}:"
+            " the existing session's access applies",
+            file=sys.stderr,
+        )
     direct_cmd = [command, *command_args]
-    if dry_run:
+    if args.dry_run:
         print(shlex.join(direct_cmd))
         return 0
     try:
@@ -599,7 +617,8 @@ Examples:
     parser.add_argument(
         "--ssh",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        # None, not False, so pass-through can tell --no-ssh from no flag.
+        default=None,
         help="Expose the real ~/.ssh and ssh-agent (default: an empty directory)",
     )
     parser.add_argument(
@@ -640,7 +659,9 @@ Examples:
         os.environ.get("SBOX") == "1"
         and os.environ.get("DANGER_SBOX_PASS_THROUGH") == "1"
     ):
-        return run_directly(command, command_args, args.dry_run)
+        return run_directly(command, command_args, args)
+    # Past pass-through, an absent --ssh means the default: not exposed.
+    args.ssh = bool(args.ssh)
 
     is_macos = sys.platform == "darwin"
     if is_macos:
