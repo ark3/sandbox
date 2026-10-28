@@ -2,7 +2,9 @@
 """Generic bubblewrap sandbox tool with auto-detection."""
 
 import argparse
+import errno
 import os
+import pwd
 import shlex
 import shutil
 import sys
@@ -147,6 +149,41 @@ def check_sandbox_exec():
     if not Path("/usr/bin/sandbox-exec").is_file():
         print("Error: macOS sandbox-exec is not installed at /usr/bin/sandbox-exec", file=sys.stderr)
         sys.exit(1)
+
+
+# Why a write into the home directory can fail inside a sandbox: bwrap's
+# read-only root refuses it with EROFS, a Seatbelt deny with EPERM. Anything
+# else -- a full disk, a quota, a missing directory, plain permissions -- says
+# nothing about containment, so it must not count.
+CONFINED_ERRNOS = {errno.EROFS, errno.EPERM}
+
+
+def login_home() -> Path:
+    """The account's home directory from the password database.
+
+    Deliberately not $HOME: it comes from the same inheritable environment as
+    the SBOX marker this check backs up, so pointing it at / would make the
+    probe fail -- and pass-through engage -- on the host.
+    """
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def home_is_write_protected(home: Path) -> bool:
+    """Whether a sandbox refuses writes to home, by trying one.
+
+    This backs up SBOX=1 with something the sandboxed command cannot forge on
+    the host: both backends leave home itself read-only. A home made writable
+    inside the session (``--rw ~``, or ~ as the workspace) fails closed, back to
+    nesting. On the host the probe briefly creates, then removes, a file in
+    home; it only runs once both pass-through variables are set.
+    """
+    try:
+        fd, probe = tempfile.mkstemp(prefix=".sbox-probe-", dir=home)
+    except OSError as e:
+        return e.errno in CONFINED_ERRNOS
+    os.close(fd)
+    os.unlink(probe)
+    return False
 
 
 def find_workspace_via_markers(start_path: Path) -> Path | None:
@@ -653,13 +690,20 @@ Examples:
         )
     command_args = injected + command_args
 
-    # Both must be exactly "1": opting in outside sbox must still create a
-    # sandbox. SBOX is an inherited marker, not a containment verification.
+    # Both must be exactly "1", and SBOX is only an inherited marker, so a
+    # write probe has to confirm the sandbox too: anything that can set
+    # environment variables on the host must not be able to skip it.
     if (
         os.environ.get("SBOX") == "1"
         and os.environ.get("DANGER_SBOX_PASS_THROUGH") == "1"
     ):
-        return run_directly(command, command_args, args)
+        home = login_home()
+        if home_is_write_protected(home):
+            return run_directly(command, command_args, args)
+        print(
+            f"sbox: not passing through: no sandbox refused a write to {home}",
+            file=sys.stderr,
+        )
     # Past pass-through, an absent --ssh means the default: not exposed.
     args.ssh = bool(args.ssh)
 

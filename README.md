@@ -220,7 +220,7 @@ The `SBOX=1` environment variable is set inside the sandbox so tools can detect 
 
 By default, invoking `sbox` inside an existing session creates another sandbox.
 Set `DANGER_SBOX_PASS_THROUGH=1` to run the command directly instead when
-`SBOX=1` is also present:
+`SBOX=1` is also present and the session is confirmed to be a sandbox:
 
 ```sh
 export DANGER_SBOX_PASS_THROUGH=1
@@ -236,14 +236,25 @@ it to `0` to restore nesting.
 Pass-through preserves command argument injection, the current directory, and
 the environment. It skips backend checks, workspace detection, and profile
 resolution; `--workspace`, `--profile`, `--rw`, and `--ssh`/`--no-ssh` have no
-effect on the existing sandbox. Choose the outer session's access accordingly.
-`--dry-run` prints only the command that would run, including injected arguments.
-A diagnostic on stderr announces pass-through.
+effect on the existing sandbox, and any of them given is named on stderr as
+ignored. Choose the outer session's access accordingly. `--dry-run` prints only
+the command that would run, including injected arguments. A diagnostic on stderr
+announces pass-through.
 
-The `DANGER_` prefix is deliberate: `SBOX` is an inherited environment marker,
-not proof of containment. Setting both variables outside a sandbox also skips
-sandbox creation, including when sbox injects arguments disabling a tool's own
-sandbox.
+`SBOX` is an inherited environment marker, not proof of containment: anything
+that can set environment variables on the host -- an `.envrc` written into the
+workspace, say -- could set it there. So before passing through, sbox also tries
+to create a file in your home directory, which both backends leave read-only.
+Only a refusal from the sandbox counts (`EROFS` under bubblewrap, `EPERM` under
+Seatbelt); if the write succeeds, or fails for another reason such as a full
+disk, sbox says so and creates a sandbox as usual. The directory comes from the
+password database rather than `$HOME`, which is just as easy to set. A session
+that makes home writable -- `--rw ~`, or home as the workspace -- therefore
+nests instead of passing through.
+
+The `DANGER_` prefix remains deliberate: the probe shows that *some* sandbox
+denies writes to home, not that it is an sbox session with the access you
+expect, and sbox still injects arguments disabling a tool's own sandbox.
 
 ## Development
 
