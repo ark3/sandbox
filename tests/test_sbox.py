@@ -12,7 +12,10 @@ both halves of that split.
 Run with `uv run pytest`.
 """
 
+import errno
+import json
 import os
+import pwd
 import shlex
 import shutil
 import socket
@@ -134,6 +137,198 @@ def test_no_command_errors(run_sbox):
     assert "command" in r.stderr
 
 
+# --- pass-through ------------------------------------------------------------
+# Most of these stub the containment probe as confined (see sbox_argv in
+# conftest), since a test cannot make the real home directory read-only.
+
+
+@pytest.mark.parametrize(
+    "marker,opt_in",
+    [("", ""), ("1", ""), ("", "1"), ("0", "1"), ("true", "1"),
+     ("1", "0"), ("1", "true"), ("1", "1")],
+)
+def test_pass_through_requires_both_markers(run_sbox, marker, opt_in):
+    r = run_sbox(
+        "codex", "--sandbox", "read-only",
+        extra_env={"SBOX": marker, "DANGER_SBOX_PASS_THROUGH": opt_in},
+        confined=True,
+    )
+    assert r.returncode == 0
+    if marker == opt_in == "1":
+        assert shlex.split(r.stdout) == [
+            "codex", "--sandbox", "danger-full-access", "--sandbox", "read-only"
+        ]
+        assert "passing through" in r.stderr
+    else:
+        assert "passing through" not in r.stderr
+        assert "bwrap" in r.stdout or "/usr/bin/sandbox-exec" in r.stdout
+
+
+def test_pass_through_requires_write_protected_home(run_sbox):
+    # Both variables set, but no sandbox refused the probe's write: that is the
+    # host, or a session that made home writable, so a sandbox is still created.
+    r = run_sbox(
+        "codex",
+        extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        confined=False,
+    )
+    assert r.returncode == 0
+    assert "not passing through" in r.stderr
+    assert "no sandbox refused a write" in r.stderr
+    assert "bwrap" in r.stdout or "/usr/bin/sandbox-exec" in r.stdout
+
+
+def test_probe_finds_writable_home_and_cleans_up(sbox, tmp_path):
+    assert not sbox.home_is_write_protected(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_probe_tolerates_failed_cleanup(sbox, tmp_path, monkeypatch):
+    # The write already succeeded, so home is writable whatever unlink says.
+    def fail(path):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+
+    monkeypatch.setattr(sbox.os, "unlink", fail)
+    assert not sbox.home_is_write_protected(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "code,confined",
+    [(errno.EROFS, True), (errno.EPERM, True),
+     # Failures that say nothing about a sandbox must not enable pass-through.
+     (errno.EACCES, False), (errno.ENOSPC, False), (errno.EDQUOT, False),
+     (errno.ENOENT, False)],
+)
+def test_probe_counts_only_sandbox_refusals(
+    sbox, tmp_path, monkeypatch, code, confined
+):
+    def refuse(**kwargs):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(sbox.tempfile, "mkstemp", refuse)
+    assert sbox.home_is_write_protected(tmp_path) is confined
+
+
+@BWRAP_ONLY
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="needs real bubblewrap")
+def test_pass_through_under_real_bwrap(sbox_path, tmp_path):
+    # Unstubbed: sbox inside a real bwrap session must see its probe refused
+    # (EROFS from the read-only root) and pass through.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    r = subprocess.run(
+        [sys.executable, str(sbox_path), "--profile", "none",
+         sys.executable, "-I", str(sbox_path), "--dry-run", "true"],
+        cwd=workspace,
+        env={**os.environ, "DANGER_SBOX_PASS_THROUGH": "1"},
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "passing through inside existing session" in r.stderr
+    assert r.stdout.strip() == "true"
+
+
+def test_probe_home_ignores_home_variable(sbox, tmp_path, monkeypatch):
+    # $HOME is as forgeable as SBOX; the password database is not.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert sbox.login_home() == Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def test_pass_through_executes_without_sandbox_setup(sbox_cmd, tmp_path):
+    # No backend on PATH, no workspace, and nonexistent mount paths: all must
+    # be irrelevant. An absolute tool path still receives its default flags.
+    command = tmp_path / "codex"
+    command.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "print(json.dumps([sys.argv[1:], os.getcwd(), dict(os.environ)]))\n"
+        "sys.exit(37)\n"
+    )
+    command.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": "",
+        "HOME": str(tmp_path / "home"),
+        "SBOX": "1",
+        "DANGER_SBOX_PASS_THROUGH": "1",
+        "SSH_AUTH_SOCK": "/existing/agent.sock",
+        "UV_TOOL_DIR": "/existing/tools",
+    }
+    r = subprocess.run(
+        [*sbox_cmd(confined=True),
+         "--workspace", str(tmp_path / "missing-workspace"),
+         "--rw", str(tmp_path / "missing-mount"), "--profile", "none",
+         "--no-ssh", str(command), "--sandbox", "read-only", "two words", ""],
+        cwd=tmp_path, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 37
+    argv, cwd, child_env = json.loads(r.stdout)
+    assert argv == [
+        "--sandbox", "danger-full-access", "--sandbox", "read-only", "two words", ""
+    ]
+    assert cwd == str(tmp_path)
+    for key in ("SBOX", "DANGER_SBOX_PASS_THROUGH", "SSH_AUTH_SOCK", "UV_TOOL_DIR"):
+        assert child_env[key] == env[key]
+    assert not (tmp_path / "home").exists()
+    assert (
+        "ignoring --workspace, --profile, --rw, --no-ssh:"
+        " the existing session's access applies" in r.stderr
+    )
+
+
+def test_pass_through_without_sandbox_options_warns_nothing(run_sbox):
+    r = run_sbox("bash", extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"}, confined=True)
+    assert r.returncode == 0
+    assert "ignoring" not in r.stderr
+
+
+def test_pass_through_names_ssh_as_given(run_sbox):
+    r = run_sbox(
+        "--ssh", "bash", extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        confined=True,
+    )
+    assert "ignoring --ssh:" in r.stderr
+
+
+def test_pass_through_dry_run_quotes_arguments(run_sbox):
+    r = run_sbox(
+        "unknown-command", "two words", "", "$(exit 1)",
+        extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        confined=True,
+    )
+    assert r.returncode == 0
+    assert shlex.split(r.stdout) == ["unknown-command", "two words", "", "$(exit 1)"]
+
+
+def test_pass_through_missing_command(sbox_cmd):
+    # Exercise execution rather than --dry-run, which doesn't resolve commands.
+    r = subprocess.run(
+        [*sbox_cmd(confined=True), "sbox-nonexistent-command"],
+        env={**os.environ, "PATH": "", "SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert "Command not found: sbox-nonexistent-command" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_pass_through_unexecutable_command(sbox_cmd, tmp_path):
+    # Present but not executable: execvp raises PermissionError, not
+    # FileNotFoundError, and that must not surface as a traceback either.
+    command = tmp_path / "not-executable"
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o644)
+    r = subprocess.run(
+        [*sbox_cmd(confined=True), str(command)],
+        env={**os.environ, "SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert f"Cannot execute {command}: Permission denied" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 # --- redirects --------------------------------------------------------------
 # ~/.m2/repository is bind-mounted from ~/.cache/agent-m2 so `mvn install` has
 # somewhere to write without exposing the real local repository.
@@ -153,8 +348,9 @@ def test_maven_repo_is_redirected(run_sbox, tmp_path):
 
 @BWRAP_ONLY
 def test_dry_run_creates_no_directories(run_sbox, tmp_path):
-    # create_redirect_dirs() is the only thing sbox writes outside the sandbox,
-    # and it must stay off the --dry-run path.
+    # create_redirect_dirs() is the only thing sbox leaves outside the sandbox,
+    # and it must stay off the --dry-run path. (The pass-through probe's file
+    # is transient and needs both pass-through variables set.)
     home = tmp_path / "home"
     home.mkdir()
     r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})
@@ -480,6 +676,21 @@ def test_seatbelt_home_is_not_writable(run_macos_sbox):
     assert r.returncode != 0
     assert "Operation not permitted" in r.stderr
     assert not (home / "blocked").exists()
+
+
+@MACOS_ONLY
+def test_pass_through_under_real_seatbelt(run_macos_sbox, sbox_path):
+    # Unstubbed: sbox inside a real Seatbelt session must see its probe refused
+    # (EPERM from the policy's write deny) and pass through.
+    run, _, _, _ = run_macos_sbox
+    r = run(
+        "--profile", "none",
+        sys.executable, "-I", str(sbox_path), "--dry-run", "true",
+        extra_env={"DANGER_SBOX_PASS_THROUGH": "1"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert "passing through inside existing session" in r.stderr
+    assert r.stdout.strip() == "true"
 
 
 @MACOS_ONLY

@@ -2,7 +2,10 @@
 """Generic bubblewrap sandbox tool with auto-detection."""
 
 import argparse
+import contextlib
+import errno
 import os
+import pwd
 import shlex
 import shutil
 import sys
@@ -147,6 +150,45 @@ def check_sandbox_exec():
     if not Path("/usr/bin/sandbox-exec").is_file():
         print("Error: macOS sandbox-exec is not installed at /usr/bin/sandbox-exec", file=sys.stderr)
         sys.exit(1)
+
+
+# Why a write into the home directory can fail inside a sandbox: bwrap's
+# read-only root refuses it with EROFS, a Seatbelt deny with EPERM. Anything
+# else -- a full disk, a quota, a missing directory, plain permissions -- says
+# nothing about containment, so it must not count.
+CONFINED_ERRNOS = {errno.EROFS, errno.EPERM}
+
+
+def login_home() -> Path:
+    """The account's home directory from the password database.
+
+    Deliberately not $HOME: it comes from the same inheritable environment as
+    the SBOX marker this check backs up, so pointing it at / would make the
+    probe fail -- and pass-through engage -- on the host.
+    """
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def home_is_write_protected(home: Path) -> bool:
+    """Whether a sandbox refuses writes to home, by trying one.
+
+    This backs up SBOX=1 with something the sandboxed command cannot forge on
+    the host: both backends leave home itself read-only. A home made writable
+    inside the session (``--rw ~``, or ~ as the workspace) fails closed, back to
+    nesting. On the host the probe briefly creates, then removes, a file in
+    home -- even under --dry-run, which has to report whether pass-through
+    applies -- but only once both pass-through variables are set.
+    """
+    try:
+        fd, probe = tempfile.mkstemp(prefix=".sbox-probe-", dir=home)
+    except OSError as e:
+        return e.errno in CONFINED_ERRNOS
+    os.close(fd)
+    # The write succeeded, which already settles the answer; a failed cleanup
+    # leaves a stray file, not a reason to abort.
+    with contextlib.suppress(OSError):
+        os.unlink(probe)
+    return False
 
 
 def find_workspace_via_markers(start_path: Path) -> Path | None:
@@ -527,6 +569,46 @@ def seatbelt_shell_command(
     return shell_command + command
 
 
+def run_directly(
+    command: str, command_args: list[str], args: argparse.Namespace
+) -> int:
+    """Run the command in place of a nested sandbox, for pass-through.
+
+    The cwd and environment are inherited unchanged; sandbox options cannot
+    alter the existing session's access, so any that were given are named as
+    ignored rather than silently dropped. Returns only on --dry-run or failure.
+    """
+    print("sbox: passing through inside existing session", file=sys.stderr)
+    ignored = [
+        flag
+        for flag, given in [
+            ("--workspace", args.workspace is not None),
+            ("--profile", args.profile is not None),
+            ("--rw", bool(args.rw)),
+            ("--ssh" if args.ssh else "--no-ssh", args.ssh is not None),
+        ]
+        if given
+    ]
+    if ignored:
+        print(
+            f"sbox: ignoring {', '.join(ignored)}:"
+            " the existing session's access applies",
+            file=sys.stderr,
+        )
+    direct_cmd = [command, *command_args]
+    if args.dry_run:
+        print(shlex.join(direct_cmd))
+        return 0
+    try:
+        os.execvp(command, direct_cmd)
+    except FileNotFoundError:
+        print(f"Error: Command not found: {command}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"Error: Cannot execute {command}: {e.strerror}", file=sys.stderr)
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         usage="%(prog)s [OPTIONS] COMMAND [ARGS...]",
@@ -577,7 +659,8 @@ Examples:
     parser.add_argument(
         "--ssh",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        # None, not False, so pass-through can tell --no-ssh from no flag.
+        default=None,
         help="Expose the real ~/.ssh and ssh-agent (default: an empty directory)",
     )
     parser.add_argument(
@@ -596,23 +679,12 @@ Examples:
     args = parser.parse_args()
     command, command_args = args.command, args.args
 
-    is_macos = sys.platform == "darwin"
-    if is_macos:
-        check_sandbox_exec()
-    else:
-        check_bubblewrap()
-
-    work_dir = Path.cwd()
-    workspace, rel_path = resolve_workspace(args.workspace, work_dir)
-
     # A command is identified by its basename, derived once and used for both
     # lookups below so the two cannot disagree about what is being run: an
     # absolute path to a tool still resolves that tool's profile, and a wrapper
     # command (a shell, make, env ...) run under a tool's profile still never
     # receives that tool's flags.
     command_name = Path(command).name
-
-    profile = resolve_profile(args.profile, command_name)
 
     # Injected before the user's own arguments, so a user-supplied value of the
     # same flag wins; log exactly what we add.
@@ -622,6 +694,33 @@ Examples:
             f"sbox: adding {command_name} args: {' '.join(injected)}", file=sys.stderr
         )
     command_args = injected + command_args
+
+    # Both must be exactly "1", and SBOX is only an inherited marker, so a
+    # write probe has to confirm the sandbox too: anything that can set
+    # environment variables on the host must not be able to skip it.
+    if (
+        os.environ.get("SBOX") == "1"
+        and os.environ.get("DANGER_SBOX_PASS_THROUGH") == "1"
+    ):
+        home = login_home()
+        if home_is_write_protected(home):
+            return run_directly(command, command_args, args)
+        print(
+            f"sbox: not passing through: no sandbox refused a write to {home}",
+            file=sys.stderr,
+        )
+    # Past pass-through, an absent --ssh means the default: not exposed.
+    args.ssh = bool(args.ssh)
+
+    is_macos = sys.platform == "darwin"
+    if is_macos:
+        check_sandbox_exec()
+    else:
+        check_bubblewrap()
+
+    work_dir = Path.cwd()
+    workspace, rel_path = resolve_workspace(args.workspace, work_dir)
+    profile = resolve_profile(args.profile, command_name)
 
     if is_macos:
         sandbox_cmd = build_seatbelt_command(

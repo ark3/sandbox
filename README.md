@@ -121,7 +121,7 @@ The consequences are the same for both, and worth knowing:
 - Private storage starts empty and fills up as you work. It persists across runs, so the cost is a slow first build, not a slow every build — but downloads outside the sandbox don't warm it, and vice versa.
 - Anything an agent installs is invisible outside. A library `mvn install`ed inside the sandbox won't be found by an `mvn` run outside it.
 
-sbox creates both ends of a bind redirect on the host if they don't exist — the only case where it writes outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first.
+sbox creates both ends of a bind redirect on the host if they don't exist — the only case where it leaves anything outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first. (The one other write is transient: with both [pass-through](#nested-sessions) variables set, sbox creates and immediately removes a probe file in your home directory, under `--dry-run` too.)
 
 If you genuinely want the real path inside the sandbox, `--rw` is applied after redirects and wins:
 
@@ -215,6 +215,49 @@ sbox claude --resume UUID
 ```
 
 The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment. `UV_TOOL_DIR` is also set, for the reasons in [Sandbox-private state](#sandbox-private-state).
+
+### Nested sessions
+
+By default, invoking `sbox` inside an existing session creates another sandbox.
+Set `DANGER_SBOX_PASS_THROUGH=1` to run the command directly instead when
+`SBOX=1` is also present and the session is confirmed to be a sandbox:
+
+```sh
+sbox --profile all bash          # on the host: creates a sandbox
+# Inside that shell:
+export DANGER_SBOX_PASS_THROUGH=1
+sbox codex                       # runs directly within the existing sandbox
+```
+
+Both variables must equal exactly `1`. Set the opt-in inside the session, not in
+your host shell, so that it never sits waiting for a stray `SBOX=1` on the host.
+The session inherits sbox's environment, so prefixing the outer command works
+too and keeps the variable out of the host shell:
+`DANGER_SBOX_PASS_THROUGH=1 sbox --profile all bash`. Unset it or set it to `0`
+to restore nesting.
+
+Pass-through preserves command argument injection, the current directory, and
+the environment. It skips backend checks, workspace detection, and profile
+resolution; `--workspace`, `--profile`, `--rw`, and `--ssh`/`--no-ssh` have no
+effect on the existing sandbox, and any of them given is named on stderr as
+ignored. Choose the outer session's access accordingly. `--dry-run` prints only
+the command that would run, including injected arguments. A diagnostic on stderr
+announces pass-through.
+
+`SBOX` is an inherited environment marker, not proof of containment: anything
+that can set environment variables on the host -- an `.envrc` written into the
+workspace, say -- could set it there. So before passing through, sbox also tries
+to create a file in your home directory, which both backends leave read-only.
+Only a refusal from the sandbox counts (`EROFS` under bubblewrap, `EPERM` under
+Seatbelt); if the write succeeds, or fails for another reason such as a full
+disk, sbox says so and creates a sandbox as usual. The directory comes from the
+password database rather than `$HOME`, which is just as easy to set. A session
+that makes home writable -- `--rw ~`, or home as the workspace -- therefore
+nests instead of passing through.
+
+The `DANGER_` prefix remains deliberate: the probe shows that *some* sandbox
+denies writes to home, not that it is an sbox session with the access you
+expect, and sbox still injects arguments disabling a tool's own sandbox.
 
 ## Development
 
