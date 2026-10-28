@@ -12,6 +12,7 @@ both halves of that split.
 Run with `uv run pytest`.
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -132,6 +133,86 @@ def test_no_command_errors(run_sbox):
     r = run_sbox()
     assert r.returncode != 0
     assert "command" in r.stderr
+
+
+@pytest.mark.parametrize(
+    "marker,opt_in",
+    [("", ""), ("1", ""), ("", "1"), ("0", "1"), ("true", "1"),
+     ("1", "0"), ("1", "true"), ("1", "1")],
+)
+def test_pass_through_requires_both_markers(run_sbox, marker, opt_in):
+    r = run_sbox(
+        "codex", "--sandbox", "read-only",
+        extra_env={"SBOX": marker, "DANGER_SBOX_PASS_THROUGH": opt_in},
+    )
+    assert r.returncode == 0
+    if marker == opt_in == "1":
+        assert shlex.split(r.stdout) == [
+            "codex", "--sandbox", "danger-full-access", "--sandbox", "read-only"
+        ]
+        assert "passing through" in r.stderr
+    else:
+        assert "passing through" not in r.stderr
+        assert "bwrap" in r.stdout or "/usr/bin/sandbox-exec" in r.stdout
+
+
+def test_pass_through_executes_without_sandbox_setup(sbox_path, tmp_path):
+    # No backend on PATH, no workspace, and nonexistent mount paths: all must
+    # be irrelevant. An absolute tool path still receives its default flags.
+    command = tmp_path / "codex"
+    command.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "print(json.dumps([sys.argv[1:], os.getcwd(), dict(os.environ)]))\n"
+        "sys.exit(37)\n"
+    )
+    command.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": "",
+        "HOME": str(tmp_path / "home"),
+        "SBOX": "1",
+        "DANGER_SBOX_PASS_THROUGH": "1",
+        "SSH_AUTH_SOCK": "/existing/agent.sock",
+        "UV_TOOL_DIR": "/existing/tools",
+    }
+    r = subprocess.run(
+        [sys.executable, str(sbox_path),
+         "--workspace", str(tmp_path / "missing-workspace"),
+         "--rw", str(tmp_path / "missing-mount"), "--profile", "none",
+         "--no-ssh", str(command), "--sandbox", "read-only", "two words", ""],
+        cwd=tmp_path, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 37
+    argv, cwd, child_env = json.loads(r.stdout)
+    assert argv == [
+        "--sandbox", "danger-full-access", "--sandbox", "read-only", "two words", ""
+    ]
+    assert cwd == str(tmp_path)
+    for key in ("SBOX", "DANGER_SBOX_PASS_THROUGH", "SSH_AUTH_SOCK", "UV_TOOL_DIR"):
+        assert child_env[key] == env[key]
+    assert not (tmp_path / "home").exists()
+
+
+def test_pass_through_dry_run_quotes_arguments(run_sbox):
+    r = run_sbox(
+        "unknown-command", "two words", "", "$(exit 1)",
+        extra_env={"SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+    )
+    assert r.returncode == 0
+    assert shlex.split(r.stdout) == ["unknown-command", "two words", "", "$(exit 1)"]
+
+
+def test_pass_through_missing_command(sbox_path):
+    # Exercise execution rather than --dry-run, which doesn't resolve commands.
+    r = subprocess.run(
+        [sys.executable, str(sbox_path), "sbox-nonexistent-command"],
+        env={**os.environ, "PATH": "", "SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert "Command not found: sbox-nonexistent-command" in r.stderr
+    assert "Traceback" not in r.stderr
 
 
 # --- redirects --------------------------------------------------------------

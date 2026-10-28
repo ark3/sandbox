@@ -596,15 +596,6 @@ Examples:
     args = parser.parse_args()
     command, command_args = args.command, args.args
 
-    is_macos = sys.platform == "darwin"
-    if is_macos:
-        check_sandbox_exec()
-    else:
-        check_bubblewrap()
-
-    work_dir = Path.cwd()
-    workspace, rel_path = resolve_workspace(args.workspace, work_dir)
-
     # A command is identified by its basename, derived once and used for both
     # lookups below so the two cannot disagree about what is being run: an
     # absolute path to a tool still resolves that tool's profile, and a wrapper
@@ -612,7 +603,22 @@ Examples:
     # receives that tool's flags.
     command_name = Path(command).name
 
-    profile = resolve_profile(args.profile, command_name)
+    # Both must be exactly "1": opting in outside sbox must still create a
+    # sandbox. SBOX is an inherited marker, not a containment verification.
+    pass_through = (
+        os.environ.get("SBOX") == "1"
+        and os.environ.get("DANGER_SBOX_PASS_THROUGH") == "1"
+    )
+    is_macos = sys.platform == "darwin"
+    if not pass_through:
+        if is_macos:
+            check_sandbox_exec()
+        else:
+            check_bubblewrap()
+
+        work_dir = Path.cwd()
+        workspace, rel_path = resolve_workspace(args.workspace, work_dir)
+        profile = resolve_profile(args.profile, command_name)
 
     # Injected before the user's own arguments, so a user-supplied value of the
     # same flag wins; log exactly what we add.
@@ -622,6 +628,20 @@ Examples:
             f"sbox: adding {command_name} args: {' '.join(injected)}", file=sys.stderr
         )
     command_args = injected + command_args
+
+    if pass_through:
+        print("sbox: passing through inside existing session", file=sys.stderr)
+        direct_cmd = [command, *command_args]
+        if args.dry_run:
+            print(shlex.join(direct_cmd))
+            return 0
+        # Inherit cwd and environment unchanged; sandbox options cannot alter
+        # the existing session's access and are intentionally ignored here.
+        try:
+            os.execvp(command, direct_cmd)
+        except FileNotFoundError:
+            print(f"Error: Command not found: {command}", file=sys.stderr)
+            return 1
 
     if is_macos:
         sandbox_cmd = build_seatbelt_command(

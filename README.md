@@ -216,6 +216,35 @@ sbox claude --resume UUID
 
 The `SBOX=1` environment variable is set inside the sandbox so tools can detect they're running in a sandboxed environment. `UV_TOOL_DIR` is also set, for the reasons in [Sandbox-private state](#sandbox-private-state).
 
+### Nested sessions
+
+By default, invoking `sbox` inside an existing session creates another sandbox.
+Set `DANGER_SBOX_PASS_THROUGH=1` to run the command directly instead when
+`SBOX=1` is also present:
+
+```sh
+export DANGER_SBOX_PASS_THROUGH=1
+sbox --profile all bash    # creates a sandbox when run outside sbox
+# Inside that shell:
+sbox codex                # runs directly within the existing sandbox
+```
+
+Both variables must equal exactly `1`. The opt-in can be exported in your host
+shell: it only takes effect inside a session marked by `SBOX=1`. Unset it or set
+it to `0` to restore nesting.
+
+Pass-through preserves command argument injection, the current directory, and
+the environment. It skips backend checks, workspace detection, and profile
+resolution; `--workspace`, `--profile`, `--rw`, and `--ssh`/`--no-ssh` have no
+effect on the existing sandbox. Choose the outer session's access accordingly.
+`--dry-run` prints only the command that would run, including injected arguments.
+A diagnostic on stderr announces pass-through.
+
+The `DANGER_` prefix is deliberate: `SBOX` is an inherited environment marker,
+not proof of containment. Setting both variables outside a sandbox also skips
+sandbox creation, including when sbox injects arguments disabling a tool's own
+sandbox.
+
 ## Development
 
 Tests use [pytest](https://docs.pytest.org/) and are run with [`uv`](https://docs.astral.sh/uv/):
