@@ -544,6 +544,9 @@ def run_directly(command: str, command_args: list[str], dry_run: bool) -> int:
     except FileNotFoundError:
         print(f"Error: Command not found: {command}", file=sys.stderr)
         return 1
+    except OSError as e:
+        print(f"Error: Cannot execute {command}: {e.strerror}", file=sys.stderr)
+        return 1
 
 
 def main():

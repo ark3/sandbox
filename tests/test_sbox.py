@@ -215,6 +215,22 @@ def test_pass_through_missing_command(sbox_path):
     assert "Traceback" not in r.stderr
 
 
+def test_pass_through_unexecutable_command(sbox_path, tmp_path):
+    # Present but not executable: execvp raises PermissionError, not
+    # FileNotFoundError, and that must not surface as a traceback either.
+    command = tmp_path / "not-executable"
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o644)
+    r = subprocess.run(
+        [sys.executable, str(sbox_path), str(command)],
+        env={**os.environ, "SBOX": "1", "DANGER_SBOX_PASS_THROUGH": "1"},
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert f"Cannot execute {command}: Permission denied" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 # --- redirects --------------------------------------------------------------
 # ~/.m2/repository is bind-mounted from ~/.cache/agent-m2 so `mvn install` has
 # somewhere to write without exposing the real local repository.
