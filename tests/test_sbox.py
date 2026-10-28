@@ -183,6 +183,15 @@ def test_probe_finds_writable_home_and_cleans_up(sbox, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_probe_tolerates_failed_cleanup(sbox, tmp_path, monkeypatch):
+    # The write already succeeded, so home is writable whatever unlink says.
+    def fail(path):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+
+    monkeypatch.setattr(sbox.os, "unlink", fail)
+    assert not sbox.home_is_write_protected(tmp_path)
+
+
 @pytest.mark.parametrize(
     "code,confined",
     [(errno.EROFS, True), (errno.EPERM, True),
@@ -319,8 +328,9 @@ def test_maven_repo_is_redirected(run_sbox, tmp_path):
 
 @BWRAP_ONLY
 def test_dry_run_creates_no_directories(run_sbox, tmp_path):
-    # create_redirect_dirs() is the only thing sbox writes outside the sandbox,
-    # and it must stay off the --dry-run path.
+    # create_redirect_dirs() is the only thing sbox leaves outside the sandbox,
+    # and it must stay off the --dry-run path. (The pass-through probe's file
+    # is transient and needs both pass-through variables set.)
     home = tmp_path / "home"
     home.mkdir()
     r = run_sbox("--profile", "none", "bash", extra_env={"HOME": str(home)})

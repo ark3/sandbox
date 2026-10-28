@@ -2,6 +2,7 @@
 """Generic bubblewrap sandbox tool with auto-detection."""
 
 import argparse
+import contextlib
 import errno
 import os
 import pwd
@@ -175,14 +176,18 @@ def home_is_write_protected(home: Path) -> bool:
     the host: both backends leave home itself read-only. A home made writable
     inside the session (``--rw ~``, or ~ as the workspace) fails closed, back to
     nesting. On the host the probe briefly creates, then removes, a file in
-    home; it only runs once both pass-through variables are set.
+    home -- even under --dry-run, which has to report whether pass-through
+    applies -- but only once both pass-through variables are set.
     """
     try:
         fd, probe = tempfile.mkstemp(prefix=".sbox-probe-", dir=home)
     except OSError as e:
         return e.errno in CONFINED_ERRNOS
     os.close(fd)
-    os.unlink(probe)
+    # The write succeeded, which already settles the answer; a failed cleanup
+    # leaves a stray file, not a reason to abort.
+    with contextlib.suppress(OSError):
+        os.unlink(probe)
     return False
 
 

@@ -121,7 +121,7 @@ The consequences are the same for both, and worth knowing:
 - Private storage starts empty and fills up as you work. It persists across runs, so the cost is a slow first build, not a slow every build — but downloads outside the sandbox don't warm it, and vice versa.
 - Anything an agent installs is invisible outside. A library `mvn install`ed inside the sandbox won't be found by an `mvn` run outside it.
 
-sbox creates both ends of a bind redirect on the host if they don't exist — the only case where it writes outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first.
+sbox creates both ends of a bind redirect on the host if they don't exist — the only case where it leaves anything outside the sandbox. `--dry-run` never does; a dry-run command pasted into a shell may need those directories created first. (The one other write is transient: with both [pass-through](#nested-sessions) variables set, sbox creates and immediately removes a probe file in your home directory, under `--dry-run` too.)
 
 If you genuinely want the real path inside the sandbox, `--rw` is applied after redirects and wins:
 
