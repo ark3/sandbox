@@ -527,6 +527,25 @@ def seatbelt_shell_command(
     return shell_command + command
 
 
+def run_directly(command: str, command_args: list[str], dry_run: bool) -> int:
+    """Run the command in place of a nested sandbox, for pass-through.
+
+    The cwd and environment are inherited unchanged; sandbox options cannot
+    alter the existing session's access and are intentionally ignored here.
+    Returns only on --dry-run or failure.
+    """
+    print("sbox: passing through inside existing session", file=sys.stderr)
+    direct_cmd = [command, *command_args]
+    if dry_run:
+        print(shlex.join(direct_cmd))
+        return 0
+    try:
+        os.execvp(command, direct_cmd)
+    except FileNotFoundError:
+        print(f"Error: Command not found: {command}", file=sys.stderr)
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         usage="%(prog)s [OPTIONS] COMMAND [ARGS...]",
@@ -603,23 +622,6 @@ Examples:
     # receives that tool's flags.
     command_name = Path(command).name
 
-    # Both must be exactly "1": opting in outside sbox must still create a
-    # sandbox. SBOX is an inherited marker, not a containment verification.
-    pass_through = (
-        os.environ.get("SBOX") == "1"
-        and os.environ.get("DANGER_SBOX_PASS_THROUGH") == "1"
-    )
-    is_macos = sys.platform == "darwin"
-    if not pass_through:
-        if is_macos:
-            check_sandbox_exec()
-        else:
-            check_bubblewrap()
-
-        work_dir = Path.cwd()
-        workspace, rel_path = resolve_workspace(args.workspace, work_dir)
-        profile = resolve_profile(args.profile, command_name)
-
     # Injected before the user's own arguments, so a user-supplied value of the
     # same flag wins; log exactly what we add.
     injected = COMMAND_ARGS.get(command_name, [])
@@ -629,19 +631,23 @@ Examples:
         )
     command_args = injected + command_args
 
-    if pass_through:
-        print("sbox: passing through inside existing session", file=sys.stderr)
-        direct_cmd = [command, *command_args]
-        if args.dry_run:
-            print(shlex.join(direct_cmd))
-            return 0
-        # Inherit cwd and environment unchanged; sandbox options cannot alter
-        # the existing session's access and are intentionally ignored here.
-        try:
-            os.execvp(command, direct_cmd)
-        except FileNotFoundError:
-            print(f"Error: Command not found: {command}", file=sys.stderr)
-            return 1
+    # Both must be exactly "1": opting in outside sbox must still create a
+    # sandbox. SBOX is an inherited marker, not a containment verification.
+    if (
+        os.environ.get("SBOX") == "1"
+        and os.environ.get("DANGER_SBOX_PASS_THROUGH") == "1"
+    ):
+        return run_directly(command, command_args, args.dry_run)
+
+    is_macos = sys.platform == "darwin"
+    if is_macos:
+        check_sandbox_exec()
+    else:
+        check_bubblewrap()
+
+    work_dir = Path.cwd()
+    workspace, rel_path = resolve_workspace(args.workspace, work_dir)
+    profile = resolve_profile(args.profile, command_name)
 
     if is_macos:
         sandbox_cmd = build_seatbelt_command(
