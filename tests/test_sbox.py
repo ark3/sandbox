@@ -209,6 +209,26 @@ def test_probe_counts_only_sandbox_refusals(
     assert sbox.home_is_write_protected(tmp_path) is confined
 
 
+@BWRAP_ONLY
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="needs real bubblewrap")
+def test_pass_through_under_real_bwrap(sbox_path, tmp_path):
+    # Unstubbed: sbox inside a real bwrap session must see its probe refused
+    # (EROFS from the read-only root) and pass through.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    r = subprocess.run(
+        [sys.executable, str(sbox_path), "--profile", "none",
+         sys.executable, "-I", str(sbox_path), "--dry-run", "true"],
+        cwd=workspace,
+        env={**os.environ, "DANGER_SBOX_PASS_THROUGH": "1"},
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "passing through inside existing session" in r.stderr
+    assert r.stdout.strip() == "true"
+
+
 def test_probe_home_ignores_home_variable(sbox, tmp_path, monkeypatch):
     # $HOME is as forgeable as SBOX; the password database is not.
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -656,6 +676,21 @@ def test_seatbelt_home_is_not_writable(run_macos_sbox):
     assert r.returncode != 0
     assert "Operation not permitted" in r.stderr
     assert not (home / "blocked").exists()
+
+
+@MACOS_ONLY
+def test_pass_through_under_real_seatbelt(run_macos_sbox, sbox_path):
+    # Unstubbed: sbox inside a real Seatbelt session must see its probe refused
+    # (EPERM from the policy's write deny) and pass through.
+    run, _, _, _ = run_macos_sbox
+    r = run(
+        "--profile", "none",
+        sys.executable, "-I", str(sbox_path), "--dry-run", "true",
+        extra_env={"DANGER_SBOX_PASS_THROUGH": "1"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert "passing through inside existing session" in r.stderr
+    assert r.stdout.strip() == "true"
 
 
 @MACOS_ONLY
