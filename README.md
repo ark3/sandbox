@@ -223,15 +223,18 @@ Set `DANGER_SBOX_PASS_THROUGH=1` to run the command directly instead when
 `SBOX=1` is also present and the session is confirmed to be a sandbox:
 
 ```sh
-export DANGER_SBOX_PASS_THROUGH=1
-sbox --profile all bash    # creates a sandbox when run outside sbox
+sbox --profile all bash          # on the host: creates a sandbox
 # Inside that shell:
-sbox codex                # runs directly within the existing sandbox
+export DANGER_SBOX_PASS_THROUGH=1
+sbox codex                       # runs directly within the existing sandbox
 ```
 
-Both variables must equal exactly `1`. The opt-in can be exported in your host
-shell: it only takes effect inside a session marked by `SBOX=1`. Unset it or set
-it to `0` to restore nesting.
+Both variables must equal exactly `1`. Set the opt-in inside the session, not in
+your host shell, so that it never sits waiting for a stray `SBOX=1` on the host.
+The session inherits sbox's environment, so prefixing the outer command works
+too and keeps the variable out of the host shell:
+`DANGER_SBOX_PASS_THROUGH=1 sbox --profile all bash`. Unset it or set it to `0`
+to restore nesting.
 
 Pass-through preserves command argument injection, the current directory, and
 the environment. It skips backend checks, workspace detection, and profile
